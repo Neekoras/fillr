@@ -53,6 +53,10 @@ const KEYWORD_MAP = {
   'last_name': 'lastName', 'lastname': 'lastName', 'lname': 'lastName',
   'last-name': 'lastName', 'family_name': 'lastName', 'surname': 'lastName',
 
+  // full name (generic)
+  'name': 'fullName',
+  'full_name': 'fullName', 'fullname': 'fullName', 'your_name': 'fullName',
+
   // email
   'email': 'email', 'e-mail': 'email', 'email_address': 'email',
   'emailaddress': 'email',
@@ -94,6 +98,12 @@ const KEYWORD_MAP = {
   'website': 'website', 'url': 'website', 'portfolio': 'website',
   'personal_website': 'website', 'web_site': 'website', 'homepage': 'website',
 
+  // twitter / X
+  'twitter': 'twitter', 'twitter_url': 'twitter', 'twitter_handle': 'twitter',
+
+  // instagram
+  'instagram': 'instagram', 'instagram_url': 'instagram',
+
   // bio
   'bio': 'bio', 'about': 'bio', 'summary': 'bio', 'about_me': 'bio',
   'personal_statement': 'bio', 'cover': 'bio',
@@ -110,10 +120,6 @@ const KEYWORD_MAP = {
   'company': 'company', 'employer': 'company', 'organization': 'company',
   'organisation': 'company', 'company_name': 'company', 'companyname': 'company',
   'workplace': 'company',
-
-  // full name (generic)
-  'name': 'fullName',
-  'full_name': 'fullName', 'fullname': 'fullName', 'your_name': 'fullName',
 };
 
 // Pre-compiled fuzzy patterns for Pass 2 (avoids rebuilding ~60 RegExp objects per field)
@@ -138,6 +144,8 @@ function getProfile(data) {
     linkedin: data.linkedin || '',
     github: data.github || '',
     website: data.website || '',
+    twitter: data.twitter || '',
+    instagram: data.instagram || '',
     bio: data.bio || '',
     yearsExp: data.yearsExp || '',
     jobTitle: data.jobTitle || '',
@@ -296,12 +304,20 @@ function fillField(el, value) {
     }
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
+  } else if (el.type === 'date' && strVal) {
+    // Date inputs require YYYY-MM-DD format
+    const d = new Date(strVal);
+    if (!isNaN(d)) el.value = d.toISOString().split('T')[0];
+    else el.value = strVal; // pass through if already formatted
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.tagName === 'SELECT') {
     const opts = Array.from(el.options).filter(o => o.value !== '');
     const lower = strVal.toLowerCase();
-    // Try exact match first, then partial/includes match
+    // Tightened match order: exact → starts-with-option → option-starts-with-value
     const match = opts.find(o => o.value.toLowerCase() === lower || o.text.toLowerCase() === lower)
-      || opts.find(o => o.text.toLowerCase().includes(lower) || lower.includes(o.text.toLowerCase()));
+      || opts.find(o => o.text.toLowerCase().startsWith(lower))
+      || opts.find(o => lower.startsWith(o.text.toLowerCase()));
     if (match) {
       el.value = match.value;
     } else {
@@ -328,10 +344,38 @@ function fillField(el, value) {
   return true;
 }
 
+// ── Collect page context for Claude ──────────────────────────────────────────
+function getPageContext() {
+  const title = document.title || '';
+  const metaDesc = document.querySelector('meta[name="description"]')?.content || '';
+  const headings = Array.from(document.querySelectorAll('h1, h2, h3'))
+    .slice(0, 8)
+    .map(h => h.textContent.trim())
+    .filter(Boolean);
+  // Grab readable text near the form (event description, instructions, etc.)
+  const formEl = document.querySelector('form');
+  let nearbyText = '';
+  if (formEl) {
+    const container = formEl.closest('section, main, article') || formEl.parentElement;
+    if (container) {
+      // Collect text nodes, skip script/style, cap at 800 chars
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      const chunks = [];
+      let node;
+      while ((node = walker.nextNode()) && chunks.join(' ').length < 800) {
+        const t = node.textContent.trim();
+        if (t.length > 20) chunks.push(t);
+      }
+      nearbyText = chunks.join(' ').slice(0, 800);
+    }
+  }
+  return { title, metaDesc, headings, nearbyText };
+}
+
 // ── Build descriptor for Claude (Pass 3) ─────────────────────────────────────
 function fieldDescriptor(el) {
   const desc = {
-    id: el.id || '',
+    id: el.id || el.dataset.__fillrIdx || '',
     name: el.name || '',
     placeholder: el.placeholder || '',
     label: getLabelText(el),
@@ -347,26 +391,47 @@ function fieldDescriptor(el) {
 }
 
 // ── Apply a Claude mapping value to a field ───────────────────────────────────
-// Claude may return a profile key ("company") or a direct option value ("Yes").
-// For selects we try the raw value first, then fall back to profile key lookup.
+// Claude may return:
+//   - a profile key ("company", "firstName") → look up in profile
+//   - a direct option text for selects ("Yes", "Founder")
+//   - a generated string for open-ended questions ("I'm building a ...")
 function applyClaudeValue(el, claudeValue, profile) {
   if (!claudeValue) return false;
   if (el.tagName === 'SELECT') {
     // Try the raw Claude value as a direct option (e.g. "Yes", "No", "Founder")
     if (fillField(el, claudeValue)) return true;
   }
-  // Treat as a profile key
-  const val = profileValue(profile, claudeValue);
-  return val ? fillField(el, val) : false;
+  // Try as a profile key first
+  const profileVal = profileValue(profile, claudeValue);
+  if (profileVal) return fillField(el, profileVal);
+  // Fall back to using the Claude value as a literal generated string
+  return fillField(el, claudeValue);
 }
 
 // ── Main autofill function ────────────────────────────────────────────────────
 async function autofill() {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(null, resolve)
+    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites'], resolve)
   );
 
-  const profile = getProfile(storageData);
+  // Site blacklist check
+  const blockedSites = storageData.blockedSites || [];
+  if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) {
+    return { filled: 0 };
+  }
+
+  // Multi-profile: read from active profile
+  let profileData;
+  const profiles = storageData.profiles;
+  if (profiles && profiles.length > 0) {
+    const activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
+    profileData = profiles[activeIdx];
+  } else {
+    // Fallback: legacy flat storage (migration path)
+    profileData = storageData;
+  }
+
+  const profile = getProfile(profileData || {});
   const apiKey = storageData.apiKey || '';
   let apiError = null;
 
@@ -386,6 +451,11 @@ async function autofill() {
 
   // Pass 3 + 4: Claude API for unmatched fields
   if (unmatched.length > 0) {
+    // Assign positional index to fields with no id AND no name so Claude can key them
+    unmatched.forEach((el, i) => {
+      if (!el.id && !el.name) el.dataset.__fillrIdx = String(i);
+    });
+
     let stillUnmatched = [...unmatched];
 
     if (apiKey) {
@@ -399,12 +469,13 @@ async function autofill() {
           action: 'claudeFill',
           fields: descriptors,
           profile: profileWithFullName,
+          pageContext: getPageContext(),
         });
 
         if (response && response.mapping) {
           stillUnmatched = [];
           for (const el of unmatched) {
-            const key = el.id || el.name;
+            const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = response.mapping[key];
             if (claudeVal && applyClaudeValue(el, claudeVal, profile)) filledCount++;
             else stillUnmatched.push(el);
@@ -429,10 +500,11 @@ async function autofill() {
           action: 'claudeVisionFill',
           fields: descriptors,
           profile: profileWithFullName,
+          pageContext: getPageContext(),
         });
         if (visionResponse && visionResponse.mapping) {
           for (const el of stillUnmatched) {
-            const key = el.id || el.name;
+            const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = visionResponse.mapping[key];
             if (claudeVal) applyClaudeValue(el, claudeVal, profile) && filledCount++;
           }
@@ -443,6 +515,9 @@ async function autofill() {
         console.warn('[Autofill] Pass 4 failed:', e);
       }
     }
+
+    // Cleanup positional index attributes
+    unmatched.forEach(el => { delete el.dataset.__fillrIdx; });
   }
 
   return { filled: filledCount, apiError };
@@ -457,30 +532,38 @@ function createFloatingButton() {
   if (document.getElementById('__autofill-float-btn__')) return;
   if (!hasFormElements()) return;
 
-  const btn = document.createElement('button');
-  btn.id = '__autofill-float-btn__';
-  btn.innerHTML = 'Autofill';
-  btn.title = 'Autofill this page';
+  // Check blacklist before showing the button
+  chrome.storage.local.get('blockedSites', ({ blockedSites = [] }) => {
+    if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) return;
 
-  let isFilling = false;
-  btn.addEventListener('click', async () => {
-    if (isFilling) return;
-    isFilling = true;
-    btn.disabled = true;
-    btn.textContent = 'Filling...';
-    try {
-      const result = await autofill();
-      const count = result.filled;
-      btn.innerHTML = count > 0 ? `${count} filled` : 'Autofill';
-    } catch (e) {
-      btn.innerHTML = 'Autofill';
-    } finally {
-      isFilling = false;
-      btn.disabled = false;
-    }
-    setTimeout(() => { btn.innerHTML = 'Autofill'; }, 2000);
+    const btn = document.createElement('button');
+    btn.id = '__autofill-float-btn__';
+    btn.innerHTML = 'Autofill';
+    btn.title = 'Autofill this page';
+
+    let isFilling = false;
+    btn.addEventListener('click', async () => {
+      if (isFilling) return;
+      isFilling = true;
+      btn.disabled = true;
+      btn.textContent = 'Filling...';
+      try {
+        const result = await autofill();
+        const count = result.filled;
+        btn.innerHTML = count > 0 ? `${count} filled` : 'Autofill';
+        if (count > 0) {
+          chrome.runtime.sendMessage({ action: 'setBadge', count });
+        }
+      } catch (e) {
+        btn.innerHTML = 'Autofill';
+      } finally {
+        isFilling = false;
+        btn.disabled = false;
+      }
+      setTimeout(() => { btn.innerHTML = 'Autofill'; }, 2000);
+    });
+    document.body.appendChild(btn);
   });
-  document.body.appendChild(btn);
 }
 
 function removeFloatingButton() {
@@ -512,7 +595,12 @@ spaObserver.observe(document.body, { childList: true, subtree: true });
 // ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'fill') {
-    autofill().then(result => sendResponse(result)).catch(() => sendResponse({ filled: 0 }));
+    autofill().then(result => {
+      if (result.filled > 0) {
+        chrome.runtime.sendMessage({ action: 'setBadge', count: result.filled });
+      }
+      sendResponse(result);
+    }).catch(() => sendResponse({ filled: 0 }));
     return true; // async
   }
 

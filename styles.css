@@ -32,8 +32,6 @@
   --transition:   150ms ease;
 }
 
-html { background: transparent; }
-
 body {
   width: 380px;
   font-family: var(--font-sans);
@@ -149,6 +147,65 @@ body {
   transform: scale(2);
 }
 
+.btn-hover-fill:active { opacity: 0.85; }
+
+/* ── Profile bar ───────────────────────────────────────────────────────────── */
+.profile-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  background: var(--header);
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-bar select {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-primary);
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.profile-bar select:focus { border-color: var(--gold); }
+
+.btn-profile-action {
+  background: var(--surface-2);
+  border: 1px solid var(--border-input);
+  color: var(--text-label);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 500;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all var(--transition);
+  line-height: 1;
+  padding: 0;
+}
+
+.btn-profile-action:hover {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.btn-profile-delete:hover {
+  border-color: var(--error-border);
+  color: var(--error);
+}
+
 /* ── Tabs ──────────────────────────────────────────────────────────────────── */
 .tabs {
   display: flex;
@@ -176,7 +233,7 @@ body {
 }
 
 .tab-btn:not(.active):hover {
-  color: #888;
+  color: var(--text-label);
 }
 
 /* ── Tab content ───────────────────────────────────────────────────────────── */
@@ -187,7 +244,7 @@ body {
   overflow-y: auto;
   background: var(--surface);
   scrollbar-width: thin;
-  scrollbar-color: #2A2A2A transparent;
+  scrollbar-color: var(--border) transparent;
 }
 
 .tab-content.active { display: block; }
@@ -267,6 +324,34 @@ textarea {
   min-height: 72px;
 }
 
+/* ── Input with icon ───────────────────────────────────────────────────────── */
+.input-with-icon {
+  position: relative;
+}
+
+.input-with-icon input {
+  padding-right: 40px;
+}
+
+.btn-icon {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  transition: color var(--transition);
+}
+
+.btn-icon:hover { color: var(--gold); }
+.btn-icon:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
 /* ── Buttons ───────────────────────────────────────────────────────────────── */
 .btn {
   font-family: var(--font-sans);
@@ -287,11 +372,50 @@ textarea {
 }
 
 .btn-primary:hover { background: var(--gold-light); }
+.btn-primary:active { background: var(--gold); transform: scale(0.98); }
+
+.btn-secondary {
+  background: var(--surface-2);
+  color: var(--text-label);
+  border: 1px solid var(--border-input);
+}
+
+.btn-secondary:hover { border-color: var(--border-hover); color: var(--text-primary); }
+
+.btn-ghost {
+  background: none;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.btn-ghost:hover { color: var(--error); border-color: var(--error-border); }
+
+.btn-sm {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 8px;
+}
 
 .btn-full { width: 100%; }
 
 .btn-row {
   margin-top: 24px;
+}
+
+.btn-row-inline {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Disabled states */
+button:disabled,
+.btn:disabled,
+.btn-fill-page:disabled,
+.btn-hover-fill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 /* ── Settings ──────────────────────────────────────────────────────────────── */
@@ -360,9 +484,9 @@ textarea {
   position: absolute;
   cursor: pointer;
   inset: 0;
-  background: #2A2A2A;
+  background: var(--border);
   border-radius: 22px;
-  border: 1px solid #3A3A3A;
+  border: 1px solid var(--border-hover);
   transition: background var(--transition), border-color var(--transition);
 }
 
@@ -373,7 +497,7 @@ textarea {
   width: 14px;
   left: 3px;
   bottom: 3px;
-  background: #555;
+  background: var(--text-muted);
   border-radius: 50%;
   transition: transform var(--transition), background var(--transition);
   box-shadow: 0 1px 3px rgba(0,0,0,0.4);
@@ -413,13 +537,15 @@ input:checked + .toggle-slider:before {
   box-shadow: 0 4px 20px rgba(201,169,110,0.35);
 }
 
+.btn-fill-page:active { background: var(--gold); transform: scale(0.98); }
+
 /* ── Toast ─────────────────────────────────────────────────────────────────── */
 .toast {
   position: fixed;
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%) translateY(60px);
-  background: #1E1E1E;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--text-primary);
   padding: 9px 18px;
@@ -445,6 +571,6 @@ input:checked + .toggle-slider:before {
 .tab-content::-webkit-scrollbar { width: 3px; }
 .tab-content::-webkit-scrollbar-track { background: transparent; }
 .tab-content::-webkit-scrollbar-thumb {
-  background: #2A2A2A;
+  background: var(--border);
   border-radius: 3px;
 }

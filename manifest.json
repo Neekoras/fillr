@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fillr",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Automatically fill web forms using stored profile data with Claude AI fallback",
   "permissions": [
     "storage",
@@ -33,5 +33,11 @@
       "js": ["content.js"],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "commands": {
+    "trigger-fill": {
+      "suggested_key": { "default": "Ctrl+Shift+F", "mac": "Command+Shift+F" },
+      "description": "Fill the current page"
+    }
+  }
 }
