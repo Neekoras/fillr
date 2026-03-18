@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fillr</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="card-wrap">
+
+  <div class="header">
+    <h1>Fillr</h1>
+    <button class="btn-hover-fill" id="fillPageTop" aria-label="Fill Out">
+      <span class="btn-hover-label">Fill Out</span>
+      <span class="btn-hover-reveal" aria-hidden="true">
+        <span>Fill Out</span>
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </span>
+      <span class="btn-hover-blob" aria-hidden="true"></span>
+    </button>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab-btn active" data-tab="details" role="tab" id="tab-btn-details" aria-selected="true" aria-controls="tab-details">My Details</button>
+    <button class="tab-btn" data-tab="settings" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
+  </div>
+
+  <!-- Tab 1: My Details -->
+  <div class="tab-content active" id="tab-details" role="tabpanel" aria-labelledby="tab-btn-details" tabindex="0">
+
+    <p class="section-title">Personal</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="firstName">First Name</label>
+        <input type="text" id="firstName" placeholder="Jane" autocomplete="given-name" />
+      </div>
+      <div class="form-group">
+        <label for="lastName">Last Name</label>
+        <input type="text" id="lastName" placeholder="Doe" autocomplete="family-name" />
+      </div>
+      <div class="form-group full-width">
+        <label for="email">Email</label>
+        <input type="email" id="email" placeholder="jane@example.com" autocomplete="email" />
+      </div>
+      <div class="form-group full-width">
+        <label for="phone">Phone</label>
+        <input type="tel" id="phone" placeholder="+1 555-000-0000" autocomplete="tel" />
+      </div>
+    </div>
+
+    <p class="section-title">Address</p>
+    <div class="form-grid">
+      <div class="form-group full-width">
+        <label for="address1">Address Line 1</label>
+        <input type="text" id="address1" placeholder="123 Main St" autocomplete="street-address" />
+      </div>
+      <div class="form-group full-width">
+        <label for="address2">Address Line 2</label>
+        <input type="text" id="address2" placeholder="Apt 4B" autocomplete="address-line2" />
+      </div>
+      <div class="form-group">
+        <label for="city">City</label>
+        <input type="text" id="city" placeholder="San Francisco" autocomplete="address-level2" />
+      </div>
+      <div class="form-group">
+        <label for="state">State</label>
+        <input type="text" id="state" placeholder="CA" autocomplete="address-level1" />
+      </div>
+      <div class="form-group">
+        <label for="zip">ZIP / Postal</label>
+        <input type="text" id="zip" placeholder="94105" autocomplete="postal-code" />
+      </div>
+      <div class="form-group">
+        <label for="country">Country</label>
+        <input type="text" id="country" placeholder="United States" autocomplete="country-name" />
+      </div>
+    </div>
+
+    <p class="section-title">Professional</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label for="jobTitle">Job Title</label>
+        <input type="text" id="jobTitle" placeholder="Software Engineer" />
+      </div>
+      <div class="form-group">
+        <label for="company">Company</label>
+        <input type="text" id="company" placeholder="Acme Corp" />
+      </div>
+      <div class="form-group">
+        <label for="yearsExp">Years Exp.</label>
+        <input type="number" id="yearsExp" placeholder="5" min="0" max="99" />
+      </div>
+      <div class="form-group">
+        <label for="linkedin">LinkedIn</label>
+        <input type="url" id="linkedin" placeholder="linkedin.com/in/jane" />
+      </div>
+      <div class="form-group">
+        <label for="github">GitHub</label>
+        <input type="url" id="github" placeholder="github.com/jane" />
+      </div>
+      <div class="form-group">
+        <label for="website">Website</label>
+        <input type="url" id="website" placeholder="jane.dev" />
+      </div>
+      <div class="form-group full-width">
+        <label for="bio">Bio / Summary</label>
+        <textarea id="bio" placeholder="A brief professional summary..."></textarea>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary btn-full" id="saveDetails">Save Details</button>
+    </div>
+
+  </div>
+
+  <!-- Tab 2: Settings -->
+  <div class="tab-content" id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings" tabindex="0">
+
+    <p class="section-title">Claude AI</p>
+    <div class="settings-group">
+      <div class="api-key-row">
+        <div class="form-group">
+          <label for="apiKey">Anthropic API Key</label>
+          <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" />
+        </div>
+        <button class="btn btn-primary" id="saveApiKey">Save</button>
+      </div>
+
+      <label class="setting-row" for="floatingBtn">
+        <div>
+          <div class="setting-label">Floating Button</div>
+          <div class="setting-desc">Show fill button on pages with forms</div>
+        </div>
+        <span class="toggle" aria-hidden="true">
+          <input type="checkbox" id="floatingBtn" />
+          <span class="toggle-slider"></span>
+        </span>
+      </label>
+    </div>
+
+    <div class="fill-btn-wrap">
+      <button class="btn-fill-page" id="fillPage">Fill This Page</button>
+    </div>
+
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="popup.js"></script>
+</div>
+</body>
+</html>
