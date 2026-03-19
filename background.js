@@ -2,70 +2,217 @@
 
 /**
  * Background service worker.
- * Handles Claude API calls on behalf of content.js (which cannot call
- * cross-origin APIs directly without host_permissions complications).
+ * Handles Claude API calls, badge management, and keyboard shortcut.
  */
 
+// ── Shared prompt-building helpers ────────────────────────────────────────
+function buildProfileBlock(profile) {
+  const entries = Object.entries(profile).filter(([, v]) => v);
+  return {
+    profileDesc: entries.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n'),
+    availableKeys: entries.map(([k]) => k).join(', ')
+  };
+}
+
+function buildFieldList(fields) {
+  return fields.map(f => {
+    let line = `id=${JSON.stringify(f.id)} name=${JSON.stringify(f.name)} placeholder=${JSON.stringify(f.placeholder)} label=${JSON.stringify(f.label)} type=${JSON.stringify(f.type)}`;
+    if (f.options && f.options.length) line += ` options=[${f.options.map(o => JSON.stringify(o)).join(', ')}]`;
+    return line;
+  }).join('\n');
+}
+
+function buildPageContextBlock(pageContext) {
+  if (!pageContext) return '';
+  const parts = [];
+  if (pageContext.title) parts.push(`Page title: ${pageContext.title}`);
+  if (pageContext.metaDesc) parts.push(`Description: ${pageContext.metaDesc}`);
+  if (pageContext.headings?.length) parts.push(`Headings: ${pageContext.headings.join(' | ')}`);
+  if (pageContext.nearbyText) parts.push(`Page text: ${pageContext.nearbyText}`);
+  return parts.length ? `\nPage context (use this to understand what the form is about):\n${parts.join('\n')}\n` : '';
+}
+
+// Robustly extract the first JSON object from Claude's response text,
+// immune to markdown fences, extra prose, or trailing whitespace.
+function extractJSON(rawText) {
+  const start = rawText.indexOf('{');
+  const end = rawText.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) throw new Error('No JSON object found in response');
+  return JSON.parse(rawText.slice(start, end + 1));
+}
+
+// ── Form fingerprint cache (skip Claude for repeat fills) ─────────────────
+const fillCache = new Map();
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+function fingerprint(fields) {
+  return fields.map(f => `${f.id}|${f.name}|${f.type}`).sort().join(',');
+}
+
+function getCached(fields) {
+  const key = fingerprint(fields);
+  const entry = fillCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL) { fillCache.delete(key); return null; }
+  return entry.mapping;
+}
+
+function setCache(fields, mapping) {
+  fillCache.set(fingerprint(fields), { mapping, ts: Date.now() });
+}
+
+// ── Anthropic API call with retry + exponential backoff ────────────────────
+// Retries on 429 (rate limit) and 5xx (server error). Fails immediately on 4xx.
+async function callAnthropicAPI(apiKey, messages) {
+  const delays = [0, 1000, 3000];
+  let lastError = 'Request failed';
+
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt] > 0) await new Promise(r => setTimeout(r, delays[attempt]));
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    let response;
+
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          // Required for direct browser-to-API calls from an MV3 service worker
+          'anthropic-dangerous-direct-browser-access': 'true'
+        },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 512, messages }),
+        signal: controller.signal
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') { lastError = 'Request timed out'; continue; }
+      return { error: `Network error: ${err.message}` };
+    }
+    clearTimeout(timer);
+
+    // Retryable: rate limit or server error
+    if (response.status === 429 || response.status >= 500) {
+      const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10) * 1000;
+      if (retryAfter > 0 && attempt + 1 < delays.length) delays[attempt + 1] = retryAfter;
+      lastError = `API error ${response.status}`;
+      continue;
+    }
+
+    if (!response.ok) {
+      let errorText;
+      try { const j = await response.json(); errorText = j.error?.message || response.statusText; }
+      catch { errorText = response.statusText; }
+      return { error: `API error ${response.status}: ${errorText}` };
+    }
+
+    let data;
+    try { data = await response.json(); }
+    catch { return { error: 'Failed to parse API response' }; }
+
+    const rawText = data?.content?.[0]?.text?.trim();
+    if (!rawText) return { error: 'Empty response from Claude' };
+
+    try {
+      return { mapping: extractJSON(rawText) };
+    } catch {
+      return { error: `Could not parse Claude response: ${rawText.slice(0, 100)}` };
+    }
+  }
+
+  return { error: lastError };
+}
+
+// ── Badge (debounced — prevents stacking on rapid fills) ──────────────────
+let badgeTimer = null;
+function setBadge(count) {
+  clearTimeout(badgeTimer);
+  chrome.action.setBadgeText({ text: String(count) });
+  chrome.action.setBadgeBackgroundColor({ color: '#C9A96E' });
+  badgeTimer = setTimeout(() => chrome.action.setBadgeText({ text: '' }), 4000);
+}
+
+// ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'claudeFill') {
-    handleClaudeFill(message).then(sendResponse).catch(err => {
-      sendResponse({ error: err.message || 'Unknown error' });
-    });
+    handleClaudeFill(message).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
     return true;
   }
-
   if (message.action === 'claudeVisionFill') {
-    handleClaudeVisionFill({ ...message, windowId: sender.tab?.windowId }).then(sendResponse).catch(err => {
-      sendResponse({ error: err.message || 'Unknown error' });
-    });
+    handleClaudeVisionFill({ ...message, windowId: sender.tab?.windowId }).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
     return true;
   }
-
   if (message.action === 'setBadge') {
-    chrome.action.setBadgeText({ text: String(message.count) });
-    chrome.action.setBadgeBackgroundColor({ color: '#C9A96E' });
-    setTimeout(() => chrome.action.setBadgeText({ text: '' }), 4000);
+    setBadge(message.count);
     sendResponse({ ok: true });
   }
-});
-
-// Keyboard shortcut: Ctrl+Shift+F / Cmd+Shift+F
-chrome.commands.onCommand.addListener(command => {
-  if (command === 'trigger-fill') {
-    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-      if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' });
-    });
+  if (message.action === 'testApiKey') {
+    testApiKey(message.apiKey).then(sendResponse).catch(err => sendResponse({ error: err.message }));
+    return true;
   }
 });
 
+// ── Keyboard shortcut: Ctrl+Shift+F / Cmd+Shift+F ─────────────────────────
+chrome.commands.onCommand.addListener(command => {
+  if (command !== 'trigger-fill') return;
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (!tabs[0]) return;
+    chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' }, () => {
+      if (!chrome.runtime.lastError) return;
+      // Content script not yet injected — inject it first, then retry
+      chrome.scripting.executeScript({ target: { tabId: tabs[0].id }, files: ['content.js'] }, () => {
+        if (chrome.runtime.lastError) return;
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' });
+      });
+    });
+  });
+});
+
+// ── API key test ───────────────────────────────────────────────────────────
+async function testApiKey(apiKey) {
+  if (!apiKey) return { error: 'No API key provided' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  let response;
+  try {
+    response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: controller.signal
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') return { error: 'Request timed out' };
+    return { error: `Network error: ${err.message}` };
+  }
+  clearTimeout(timer);
+  if (response.ok) return { ok: true };
+  let errorText;
+  try { const j = await response.json(); errorText = j.error?.message || response.statusText; }
+  catch { errorText = response.statusText; }
+  return { error: errorText };
+}
+
+// ── Pass 3: Claude text fill ───────────────────────────────────────────────
 async function handleClaudeFill({ fields, profile, pageContext }) {
   const { apiKey } = await chrome.storage.local.get('apiKey');
   if (!apiKey) return { error: 'No API key configured' };
 
-  // Only include non-empty profile fields for privacy
-  const profileEntries = Object.entries(profile).filter(([, v]) => v);
-  const profileDesc = profileEntries.map(([k, v]) => `${k}: "${v}"`).join('\n');
-  const availableKeys = profileEntries.map(([k]) => k).join(', ');
+  const cached = getCached(fields);
+  if (cached) return { mapping: cached };
 
-  // Build field list for the prompt
-  const fieldDesc = fields
-    .map(f => {
-      let line = `id="${f.id}" name="${f.name}" placeholder="${f.placeholder}" label="${f.label}" type="${f.type}"`;
-      if (f.options && f.options.length) line += ` options=[${f.options.map(o => `"${o}"`).join(', ')}]`;
-      return line;
-    })
-    .join('\n');
-
-  // Build page context block
-  let pageCtxBlock = '';
-  if (pageContext) {
-    const parts = [];
-    if (pageContext.title) parts.push(`Page title: ${pageContext.title}`);
-    if (pageContext.metaDesc) parts.push(`Description: ${pageContext.metaDesc}`);
-    if (pageContext.headings?.length) parts.push(`Headings: ${pageContext.headings.join(' | ')}`);
-    if (pageContext.nearbyText) parts.push(`Page text: ${pageContext.nearbyText}`);
-    if (parts.length) pageCtxBlock = `\nPage context (use this to understand what the form is about):\n${parts.join('\n')}\n`;
-  }
+  const { profileDesc, availableKeys } = buildProfileBlock(profile);
+  const fieldDesc = buildFieldList(fields);
+  const pageCtxBlock = buildPageContextBlock(pageContext);
 
   const prompt = `You are helping autofill a web form. Given the user's profile and page context, return a JSON object mapping each field's id (or name if no id) to the correct value.
 
@@ -89,106 +236,27 @@ Rules:
 Example output:
 {"applicant_first": "firstName", "contact_email": "email", "is_founder": "Yes", "build_description": "I'm building an AI-powered form autofill extension that uses Claude to intelligently match and fill web forms, saving founders hours of repetitive application work."}`;
 
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 30000);
-  let response;
-  try {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 512,
-        messages: [{ role: 'user', content: prompt }]
-      }),
-      signal: controller.signal
-    });
-  } catch (err) {
-    if (err.name === 'AbortError') return { error: 'Request timed out' };
-    return { error: `Network error: ${err.message}` };
-  } finally {
-    clearTimeout(t);
-  }
-
-  if (!response.ok) {
-    let errorText;
-    try {
-      const errJson = await response.json();
-      errorText = errJson.error?.message || response.statusText;
-    } catch {
-      errorText = response.statusText;
-    }
-    return { error: `API error ${response.status}: ${errorText}` };
-  }
-
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    return { error: 'Failed to parse API response' };
-  }
-
-  const rawText = data?.content?.[0]?.text?.trim();
-  if (!rawText) {
-    return { error: 'Empty response from Claude' };
-  }
-
-  // Strip markdown code fences if present
-  const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-
-  let mapping;
-  try {
-    mapping = JSON.parse(cleaned);
-  } catch {
-    return { error: `Could not parse Claude response as JSON: ${rawText.slice(0, 100)}` };
-  }
-
-  return { mapping };
+  const result = await callAnthropicAPI(apiKey, [{ role: 'user', content: prompt }]);
+  if (result.mapping) setCache(fields, result.mapping);
+  return result;
 }
 
+// ── Pass 4: Claude vision fill ─────────────────────────────────────────────
 async function handleClaudeVisionFill({ fields, profile, pageContext, windowId }) {
   const { apiKey } = await chrome.storage.local.get('apiKey');
   if (!apiKey) return { error: 'No API key configured' };
 
-  // Take a screenshot of the visible tab
   let screenshotDataUrl;
   try {
     screenshotDataUrl = await chrome.tabs.captureVisibleTab(windowId ?? null, { format: 'jpeg', quality: 80 });
   } catch (err) {
     return { error: `Screenshot failed: ${err.message}` };
   }
-
-  // Strip the data URL prefix to get raw base64
   const base64Image = screenshotDataUrl.replace(/^data:image\/jpeg;base64,/, '');
 
-  // Only include non-empty profile fields for privacy
-  const profileEntries = Object.entries(profile).filter(([, v]) => v);
-  const profileDesc = profileEntries.map(([k, v]) => `${k}: "${v}"`).join('\n');
-  const availableKeys = profileEntries.map(([k]) => k).join(', ');
-
-  const fieldDesc = fields
-    .map(f => {
-      let line = `id="${f.id}" name="${f.name}" placeholder="${f.placeholder}" label="${f.label}" type="${f.type}"`;
-      if (f.options && f.options.length) line += ` options=[${f.options.map(o => `"${o}"`).join(', ')}]`;
-      return line;
-    })
-    .join('\n');
-
-  // Build page context block
-  let pageCtxBlock = '';
-  if (pageContext) {
-    const parts = [];
-    if (pageContext.title) parts.push(`Page title: ${pageContext.title}`);
-    if (pageContext.metaDesc) parts.push(`Description: ${pageContext.metaDesc}`);
-    if (pageContext.headings?.length) parts.push(`Headings: ${pageContext.headings.join(' | ')}`);
-    if (pageContext.nearbyText) parts.push(`Page text: ${pageContext.nearbyText}`);
-    if (parts.length) pageCtxBlock = `\nPage context:\n${parts.join('\n')}\n`;
-  }
+  const { profileDesc, availableKeys } = buildProfileBlock(profile);
+  const fieldDesc = buildFieldList(fields);
+  const pageCtxBlock = buildPageContextBlock(pageContext);
 
   const prompt = `You are helping autofill a web form. I am sending you a screenshot of the current page along with a list of form fields that could not be matched automatically.
 
@@ -207,83 +275,17 @@ Rules:
 - Use the field "id" as the JSON key; if id is empty, use "name".
 - For simple profile fields (name, email, etc.): return the matching profile key.
 - For open-ended questions (e.g. "What will you build?", "Why do you want to attend?"): write a compelling, specific, first-person answer (2–4 sentences) that fits the user's profile and the event shown. Return the answer text directly.
-- For select/dropdown fields (type="select"): return the EXACT option text. Use the screenshot and profile to infer — e.g. jobTitle "Founder" → "Yes" for "Are you a founder?".
+- For select/dropdown fields (type="select"): return the EXACT option text. Use the screenshot and profile to infer.
 - Only include fields you are confident about.
 - Return ONLY valid JSON, no markdown, no explanation.
 
 Example: {"field_abc": "company", "field_xyz": "jobTitle", "is_founder": "Yes", "build_plan": "I'm building a developer tool that..."}`;
 
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 30000);
-  let response;
-  try {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 512,
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/jpeg',
-                data: base64Image
-              }
-            },
-            {
-              type: 'text',
-              text: prompt
-            }
-          ]
-        }]
-      }),
-      signal: controller.signal
-    });
-  } catch (err) {
-    if (err.name === 'AbortError') return { error: 'Request timed out' };
-    return { error: `Network error: ${err.message}` };
-  } finally {
-    clearTimeout(t);
-  }
-
-  if (!response.ok) {
-    let errorText;
-    try {
-      const errJson = await response.json();
-      errorText = errJson.error?.message || response.statusText;
-    } catch {
-      errorText = response.statusText;
-    }
-    return { error: `API error ${response.status}: ${errorText}` };
-  }
-
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    return { error: 'Failed to parse API response' };
-  }
-
-  const rawText = data?.content?.[0]?.text?.trim();
-  if (!rawText) return { error: 'Empty response from Claude' };
-
-  const cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-
-  let mapping;
-  try {
-    mapping = JSON.parse(cleaned);
-  } catch {
-    return { error: `Could not parse Claude response as JSON: ${rawText.slice(0, 100)}` };
-  }
-
-  return { mapping };
+  return await callAnthropicAPI(apiKey, [{
+    role: 'user',
+    content: [
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Image } },
+      { type: 'text', text: prompt }
+    ]
+  }]);
 }

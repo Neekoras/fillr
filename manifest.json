@@ -3,9 +3,11 @@
   "name": "Fillr",
   "version": "1.0.1",
   "description": "Automatically fill web forms using stored profile data with Claude AI fallback",
+  "minimum_chrome_version": "102",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -29,7 +31,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["http://*/*", "https://*/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

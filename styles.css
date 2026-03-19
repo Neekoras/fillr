@@ -557,7 +557,11 @@ input:checked + .toggle-slider:before {
   opacity: 0;
   transition: all 0.25s ease;
   z-index: 9999;
-  white-space: nowrap;
+  max-width: 320px;
+  width: max-content;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.5;
 }
 
 .toast.show {
@@ -567,10 +571,159 @@ input:checked + .toggle-slider:before {
 
 .toast.error { border-color: var(--error-border); color: var(--error); }
 
+/* ── Toast undo button ─────────────────────────────────────────────────────── */
+.toast-undo-btn {
+  background: none;
+  border: none;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 6px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.toast-undo-btn:hover { opacity: 0.8; }
+
+/* ── Save indicator (auto-save feedback in tab label) ──────────────────────── */
+.save-indicator {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-left: 5px;
+  vertical-align: middle;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.save-indicator.saving {
+  background: var(--text-muted);
+  opacity: 1;
+}
+
+.save-indicator.saved {
+  background: #6FCF97;
+  opacity: 1;
+}
+
+/* ── Onboarding banner ─────────────────────────────────────────────────────── */
+.onboarding-banner {
+  position: relative;
+  background: var(--gold-glow);
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-input);
+  padding: 12px 36px 12px 14px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.onboarding-banner p + p { margin-top: 4px; }
+
+.onboarding-hint {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+.onboarding-hint kbd {
+  background: var(--surface-2);
+  border: 1px solid var(--border-hover);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.onboarding-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: color var(--transition);
+}
+
+.onboarding-dismiss:hover { color: var(--text-primary); }
+
+/* ── Hint text (e.g. below export button) ──────────────────────────────────── */
+.hint {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+}
+
+/* ── Profile rename button ─────────────────────────────────────────────────── */
+#renameProfile {
+  font-size: 13px;
+}
+
+/* ── API key row with Test button ──────────────────────────────────────────── */
+.api-key-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.api-key-row .form-group { flex: 1; min-width: 0; }
+
+.api-key-row .btn {
+  height: 40px;
+  padding: 0 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */
 .tab-content::-webkit-scrollbar { width: 3px; }
 .tab-content::-webkit-scrollbar-track { background: transparent; }
 .tab-content::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 3px;
+}
+
+/* ── Light mode ────────────────────────────────────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:           #F5F5F5;
+    --surface:      #FFFFFF;
+    --surface-2:    #F0F0F0;
+    --header:       #F8F8F8;
+    --border:       #E0E0E0;
+    --border-input: #D5D5D5;
+    --border-hover: #BBBBBB;
+    --text-primary: #1A1A1A;
+    --text-input:   #222222;
+    --text-label:   #606060;
+    --text-section: #999999;
+    --text-muted:   #707070;
+    --bg-on-gold:   #0F0F0F;
+    --error:        #C94040;
+    --error-border: #F5C0C0;
+    --gold-glow:    rgba(201, 169, 110, 0.10);
+    --gold-glow-md: rgba(201, 169, 110, 0.22);
+  }
+
+  input::placeholder,
+  textarea::placeholder { color: #BBBBBB; }
+
+  .card-wrap { box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
+
+  .toast { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
 }

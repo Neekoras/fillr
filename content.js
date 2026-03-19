@@ -39,9 +39,31 @@
       box-shadow: 0 4px 24px rgba(201,169,110,0.3), 0 2px 8px rgba(0,0,0,0.4);
       transform: translateY(-1px);
     }
+    #__autofill-float-btn__:focus-visible {
+      outline: 2px solid #C9A96E;
+      outline-offset: 3px;
+    }
+    @media (prefers-color-scheme: light) {
+      #__autofill-float-btn__ {
+        background: #FFFFFF;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      }
+      #__autofill-float-btn__:hover {
+        box-shadow: 0 4px 24px rgba(201,169,110,0.4);
+      }
+    }
   `;
   (document.head || document.documentElement).appendChild(style);
 })();
+
+// ── Field selector constant ───────────────────────────────────────────────────
+const FIELD_SELECTOR = [
+  'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]):not([type=checkbox]):not([type=radio])',
+  'textarea',
+  'select',
+  '[contenteditable="true"]',
+  '[contenteditable=""]',
+].join(', ');
 
 // ── Keyword map (Pass 1) ──────────────────────────────────────────────────────
 const KEYWORD_MAP = {
@@ -122,7 +144,7 @@ const KEYWORD_MAP = {
   'workplace': 'company',
 };
 
-// Pre-compiled fuzzy patterns for Pass 2 (avoids rebuilding ~60 RegExp objects per field)
+// Pre-compiled fuzzy patterns for Pass 2
 const FUZZY_PATTERNS = Object.entries(KEYWORD_MAP).map(([kw, profileKey]) => ({
   re: new RegExp('(?<![a-zA-Z0-9_])' + kw.replace(/_/g, '[\\s_-]*') + '(?![a-zA-Z0-9_])', 'i'),
   profileKey
@@ -165,24 +187,27 @@ function stripInvisible(str) {
   return (str || '').replace(/[\u200B\u200C\u200D\uFEFF\u00AD\u00A0]/g, '').trim();
 }
 
+// ── Label text cache (prevents calling getLabelText 3x per field) ─────────────
+const labelCache = new WeakMap();
+
 // ── Collect visible, fillable fields ─────────────────────────────────────────
 function collectFields() {
-  const selectors = [
-    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]):not([type=checkbox]):not([type=radio])',
-    'textarea',
-    'select',
-    '[contenteditable="true"]',
-    '[contenteditable=""]',
-  ].join(', ');
+  const main = Array.from(document.querySelectorAll(FIELD_SELECTOR));
 
-  return Array.from(document.querySelectorAll(selectors)).filter(el => {
+  // Basic one-level shadow DOM support
+  const shadow = [];
+  document.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) {
+      Array.from(el.shadowRoot.querySelectorAll(FIELD_SELECTOR)).forEach(f => shadow.push(f));
+    }
+  });
+
+  return [...main, ...shadow].filter(el => {
     if (el.disabled || el.readOnly) return false;
-    // Check if already filled — strip invisible chars before deciding
     const currentVal = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
       ? el.value
       : el.textContent;
     if (stripInvisible(currentVal) !== '') return false;
-    // Basic visibility check
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
     return true;
@@ -193,58 +218,70 @@ function collectFields() {
 const INPUT_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
 
 function getLabelText(el) {
+  if (labelCache.has(el)) return labelCache.get(el);
+
+  let result = '';
+
   // 1. Explicit <label for="id">
   if (el.id) {
     const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-    if (label) return label.textContent.trim();
+    if (label) { result = label.textContent.trim(); }
   }
-  // 2. Parent <label>
-  const parentLabel = el.closest('label');
-  if (parentLabel) return parentLabel.textContent.trim();
-  // 3. aria-label
-  const ariaLabel = el.getAttribute('aria-label');
-  if (ariaLabel) return ariaLabel.trim();
-  // 4. aria-labelledby
-  const labelledBy = el.getAttribute('aria-labelledby');
-  if (labelledBy) {
-    const text = labelledBy.trim().split(/\s+/)
-      .map(id => { const t = document.getElementById(id); return t ? t.textContent.trim() : ''; })
-      .filter(Boolean).join(' ');
-    if (text) return text;
+  if (!result) {
+    // 2. Parent <label>
+    const parentLabel = el.closest('label');
+    if (parentLabel) result = parentLabel.textContent.trim();
   }
-  // 5. title attribute
-  if (el.title) return el.title.trim();
-  // 6. data-label / data-field-label attributes (used by some form builders)
-  for (const attr of ['data-label', 'data-field-label', 'data-name', 'data-question']) {
-    const v = el.getAttribute(attr);
-    if (v) return v.trim();
+  if (!result) {
+    // 3. aria-label
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) result = ariaLabel.trim();
   }
-  // 7. Walk up ancestors (max 3 levels), collect nearby text excluding other inputs
-  let node = el.parentElement;
-  for (let depth = 0; depth < 3 && node && node !== document.body; depth++) {
-    // Early stop: if this ancestor contains multiple form fields, we've crossed a section boundary
-    const inputCount = node.querySelectorAll('input:not([type=hidden]), select, textarea').length;
-    if (inputCount > 1) break;
-
-    // Check all previous siblings at this level
-    let sib = node.previousElementSibling;
-    while (sib) {
-      if (!INPUT_TAGS.has(sib.tagName)) {
-        const text = sib.textContent.trim();
-        if (text && text.length < 300) return text;
-      }
-      sib = sib.previousElementSibling;
+  if (!result) {
+    // 4. aria-labelledby
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const text = labelledBy.trim().split(/\s+/)
+        .map(id => { const t = document.getElementById(id); return t ? t.textContent.trim() : ''; })
+        .filter(Boolean).join(' ');
+      if (text) result = text;
     }
-    // Check direct text nodes of this ancestor (excluding child inputs)
-    const childText = Array.from(node.childNodes)
-      .filter(n => n.nodeType === Node.TEXT_NODE)
-      .map(n => n.textContent.trim())
-      .filter(Boolean)
-      .join(' ');
-    if (childText && childText.length < 300) return childText;
-    node = node.parentElement;
   }
-  return '';
+  if (!result && el.title) result = el.title.trim();
+  if (!result) {
+    // 6. data-label / data-field-label attributes
+    for (const attr of ['data-label', 'data-field-label', 'data-name', 'data-question']) {
+      const v = el.getAttribute(attr);
+      if (v) { result = v.trim(); break; }
+    }
+  }
+  if (!result) {
+    // 7. Walk up ancestors (max 3 levels)
+    let node = el.parentElement;
+    for (let depth = 0; depth < 3 && node && node !== document.body; depth++) {
+      const inputCount = node.querySelectorAll('input:not([type=hidden]), select, textarea').length;
+      if (inputCount > 1) break;
+      let sib = node.previousElementSibling;
+      while (sib) {
+        if (!INPUT_TAGS.has(sib.tagName)) {
+          const text = sib.textContent.trim();
+          if (text && text.length < 300) { result = text; break; }
+        }
+        sib = sib.previousElementSibling;
+      }
+      if (result) break;
+      const childText = Array.from(node.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE)
+        .map(n => n.textContent.trim())
+        .filter(Boolean)
+        .join(' ');
+      if (childText && childText.length < 300) { result = childText; break; }
+      node = node.parentElement;
+    }
+  }
+
+  labelCache.set(el, result);
+  return result;
 }
 
 // ── Normalize string for matching ─────────────────────────────────────────────
@@ -268,7 +305,7 @@ function exactMatch(el) {
 // ── Pass 2: Fuzzy word-boundary match ────────────────────────────────────────
 function fuzzyMatch(el) {
   const text = [
-    getLabelText(el),
+    getLabelText(el), // reads from cache — no extra DOM traversal
     el.placeholder || '',
     el.name || '',
     el.id || '',
@@ -279,9 +316,7 @@ function fuzzyMatch(el) {
   ].join(' ').toLowerCase();
 
   for (const { re, profileKey } of FUZZY_PATTERNS) {
-    if (re.test(text)) {
-      return profileKey;
-    }
+    if (re.test(text)) return profileKey;
   }
   return null;
 }
@@ -295,38 +330,28 @@ function fillField(el, value) {
 
   if (isContentEditable) {
     el.focus();
-    // Select all existing content and replace
     document.execCommand('selectAll', false, null);
     document.execCommand('insertText', false, strVal);
-    // Fallback if execCommand not available
-    if (stripInvisible(el.textContent) !== strVal) {
-      el.textContent = strVal;
-    }
+    if (stripInvisible(el.textContent) !== strVal) el.textContent = strVal;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.type === 'date' && strVal) {
-    // Date inputs require YYYY-MM-DD format
     const d = new Date(strVal);
     if (!isNaN(d)) el.value = d.toISOString().split('T')[0];
-    else el.value = strVal; // pass through if already formatted
+    else el.value = strVal;
     el.dispatchEvent(new InputEvent('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.tagName === 'SELECT') {
     const opts = Array.from(el.options).filter(o => o.value !== '');
     const lower = strVal.toLowerCase();
-    // Tightened match order: exact → starts-with-option → option-starts-with-value
     const match = opts.find(o => o.value.toLowerCase() === lower || o.text.toLowerCase() === lower)
       || opts.find(o => o.text.toLowerCase().startsWith(lower))
       || opts.find(o => lower.startsWith(o.text.toLowerCase()));
-    if (match) {
-      el.value = match.value;
-    } else {
-      return false;
-    }
+    if (match) { el.value = match.value; }
+    else return false;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else {
-    // React-compatible: use native setter + InputEvent so React's synthetic event system fires
     const doc = el.ownerDocument;
     const view = doc.defaultView;
     const proto = el.tagName === 'TEXTAREA'
@@ -340,7 +365,6 @@ function fillField(el, value) {
 
   el.classList.add('autofill-highlight');
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
-
   return true;
 }
 
@@ -352,19 +376,18 @@ function getPageContext() {
     .slice(0, 8)
     .map(h => h.textContent.trim())
     .filter(Boolean);
-  // Grab readable text near the form (event description, instructions, etc.)
-  const formEl = document.querySelector('form');
+  const formEl = document.querySelector('form') || document.querySelector('[role="form"]');
   let nearbyText = '';
   if (formEl) {
     const container = formEl.closest('section, main, article') || formEl.parentElement;
     if (container) {
-      // Collect text nodes, skip script/style, cap at 800 chars
       const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
       const chunks = [];
+      let len = 0;
       let node;
-      while ((node = walker.nextNode()) && chunks.join(' ').length < 800) {
+      while ((node = walker.nextNode()) && len < 800) {
         const t = node.textContent.trim();
-        if (t.length > 20) chunks.push(t);
+        if (t.length > 20) { chunks.push(t); len += t.length + 1; }
       }
       nearbyText = chunks.join(' ').slice(0, 800);
     }
@@ -378,7 +401,7 @@ function fieldDescriptor(el) {
     id: el.id || el.dataset.__fillrIdx || '',
     name: el.name || '',
     placeholder: el.placeholder || '',
-    label: getLabelText(el),
+    label: getLabelText(el), // reads from cache
     type: el.tagName === 'SELECT' ? 'select' : (el.type || el.tagName.toLowerCase()),
   };
   if (el.tagName === 'SELECT') {
@@ -391,22 +414,18 @@ function fieldDescriptor(el) {
 }
 
 // ── Apply a Claude mapping value to a field ───────────────────────────────────
-// Claude may return:
-//   - a profile key ("company", "firstName") → look up in profile
-//   - a direct option text for selects ("Yes", "Founder")
-//   - a generated string for open-ended questions ("I'm building a ...")
 function applyClaudeValue(el, claudeValue, profile) {
   if (!claudeValue) return false;
   if (el.tagName === 'SELECT') {
-    // Try the raw Claude value as a direct option (e.g. "Yes", "No", "Founder")
     if (fillField(el, claudeValue)) return true;
   }
-  // Try as a profile key first
   const profileVal = profileValue(profile, claudeValue);
   if (profileVal) return fillField(el, profileVal);
-  // Fall back to using the Claude value as a literal generated string
   return fillField(el, claudeValue);
 }
+
+// ── Undo stack ────────────────────────────────────────────────────────────────
+let undoStack = [];
 
 // ── Main autofill function ────────────────────────────────────────────────────
 async function autofill() {
@@ -414,20 +433,17 @@ async function autofill() {
     chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites'], resolve)
   );
 
-  // Site blacklist check
   const blockedSites = storageData.blockedSites || [];
   if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) {
-    return { filled: 0 };
+    return { filled: 0, blocked: true };
   }
 
-  // Multi-profile: read from active profile
   let profileData;
   const profiles = storageData.profiles;
   if (profiles && profiles.length > 0) {
     const activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
     profileData = profiles[activeIdx];
   } else {
-    // Fallback: legacy flat storage (migration path)
     profileData = storageData;
   }
 
@@ -439,8 +455,18 @@ async function autofill() {
   let filledCount = 0;
   const unmatched = [];
 
+  // Snapshot original values for undo (before any fills)
+  const originalValues = new Map();
   for (const el of fields) {
-    let profileKey = exactMatch(el) || fuzzyMatch(el);
+    originalValues.set(el, el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+      ? el.value : el.textContent);
+  }
+
+  // Pre-populate label cache for all fields in one pass
+  fields.forEach(el => getLabelText(el));
+
+  for (const el of fields) {
+    const profileKey = exactMatch(el) || fuzzyMatch(el);
     if (profileKey) {
       const val = profileValue(profile, profileKey);
       if (val && fillField(el, val)) filledCount++;
@@ -449,9 +475,7 @@ async function autofill() {
     }
   }
 
-  // Pass 3 + 4: Claude API for unmatched fields
   if (unmatched.length > 0) {
-    // Assign positional index to fields with no id AND no name so Claude can key them
     unmatched.forEach((el, i) => {
       if (!el.id && !el.name) el.dataset.__fillrIdx = String(i);
     });
@@ -460,6 +484,9 @@ async function autofill() {
 
     if (apiKey) {
       try {
+        // Notify popup that Pass 3 is starting
+        chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-text' }).catch(() => {});
+
         const profileWithFullName = {
           ...profile,
           fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
@@ -491,11 +518,14 @@ async function autofill() {
 
     if (stillUnmatched.length > 0 && apiKey) {
       try {
+        // Notify popup that Pass 4 is starting
+        chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-vision' }).catch(() => {});
+
         const profileWithFullName = {
           ...profile,
           fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
         };
-        const descriptors = stillUnmatched.map(fieldDescriptor);
+        const descriptors = stillUnmatched.map(fieldDescriptor).slice(0, 20);
         const visionResponse = await chrome.runtime.sendMessage({
           action: 'claudeVisionFill',
           fields: descriptors,
@@ -516,11 +546,18 @@ async function autofill() {
       }
     }
 
-    // Cleanup positional index attributes
     unmatched.forEach(el => { delete el.dataset.__fillrIdx; });
   }
 
-  return { filled: filledCount, apiError };
+  // Build undo stack — only fields whose value actually changed
+  undoStack = [];
+  for (const [el, original] of originalValues) {
+    const current = el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+      ? el.value : el.textContent;
+    if (current !== original) undoStack.push({ el, original });
+  }
+
+  return { filled: filledCount, apiError, hasUndo: undoStack.length > 0 };
 }
 
 // ── Floating button ───────────────────────────────────────────────────────────
@@ -532,7 +569,6 @@ function createFloatingButton() {
   if (document.getElementById('__autofill-float-btn__')) return;
   if (!hasFormElements()) return;
 
-  // Check blacklist before showing the button
   chrome.storage.local.get('blockedSites', ({ blockedSites = [] }) => {
     if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) return;
 
@@ -541,26 +577,27 @@ function createFloatingButton() {
     btn.innerHTML = 'Autofill';
     btn.title = 'Autofill this page';
 
-    let isFilling = false;
     btn.addEventListener('click', async () => {
-      if (isFilling) return;
-      isFilling = true;
+      if (btn.dataset.filling) return;
+      btn.dataset.filling = '1';
       btn.disabled = true;
       btn.textContent = 'Filling...';
       try {
         const result = await autofill();
         const count = result.filled;
-        btn.innerHTML = count > 0 ? `${count} filled` : 'Autofill';
         if (count > 0) {
-          chrome.runtime.sendMessage({ action: 'setBadge', count });
+          btn.innerHTML = `${count} filled`;
+          chrome.runtime.sendMessage({ action: 'setBadge', count }).catch(() => {});
+          setTimeout(() => { if (btn) btn.innerHTML = 'Autofill'; }, 2000);
+        } else {
+          btn.innerHTML = 'Autofill';
         }
       } catch (e) {
         btn.innerHTML = 'Autofill';
       } finally {
-        isFilling = false;
+        delete btn.dataset.filling;
         btn.disabled = false;
       }
-      setTimeout(() => { btn.innerHTML = 'Autofill'; }, 2000);
     });
     document.body.appendChild(btn);
   });
@@ -571,7 +608,6 @@ function removeFloatingButton() {
   if (btn) btn.remove();
 }
 
-// Initialize floating button based on stored setting
 chrome.storage.local.get('floatingBtn', ({ floatingBtn }) => {
   if (floatingBtn) createFloatingButton();
 });
@@ -592,24 +628,37 @@ const spaObserver = new MutationObserver(() => {
 });
 spaObserver.observe(document.body, { childList: true, subtree: true });
 
+// Disconnect observer on page unload to prevent memory leak
+window.addEventListener('beforeunload', () => {
+  spaObserver.disconnect();
+  clearTimeout(_spaDebounce);
+});
+
 // ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'fill') {
     autofill().then(result => {
       if (result.filled > 0) {
-        chrome.runtime.sendMessage({ action: 'setBadge', count: result.filled });
+        chrome.runtime.sendMessage({ action: 'setBadge', count: result.filled }).catch(() => {});
       }
       sendResponse(result);
     }).catch(() => sendResponse({ filled: 0 }));
-    return true; // async
+    return true;
+  }
+
+  if (message.action === 'undoFill') {
+    let restored = 0;
+    for (const { el, original } of undoStack) {
+      if (fillField(el, original)) restored++;
+    }
+    undoStack = [];
+    sendResponse({ restored });
+    return true;
   }
 
   if (message.action === 'toggleFloatingBtn') {
-    if (message.enabled) {
-      createFloatingButton();
-    } else {
-      removeFloatingButton();
-    }
+    if (message.enabled) createFloatingButton();
+    else removeFloatingButton();
     sendResponse({ ok: true });
   }
 });

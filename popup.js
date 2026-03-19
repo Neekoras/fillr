@@ -63,6 +63,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
 // ── Toast helper ──────────────────────────────────────────────────────────────
 let toastTimer = null;
+
 function showToast(msg, isError = false) {
   clearTimeout(toastTimer);
   const toast = document.getElementById('toast');
@@ -73,13 +74,46 @@ function showToast(msg, isError = false) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), isError ? 4000 : 2800);
 }
 
+function showToastWithUndo(msg, onUndo) {
+  clearTimeout(toastTimer);
+  const toast = document.getElementById('toast');
+  toast.innerHTML = '';
+  const text = document.createTextNode(msg + ' ');
+  const undoBtn = document.createElement('button');
+  undoBtn.className = 'toast-undo-btn';
+  undoBtn.textContent = 'Undo';
+  undoBtn.addEventListener('click', () => {
+    toast.classList.remove('show');
+    clearTimeout(toastTimer);
+    onUndo();
+  });
+  toast.appendChild(text);
+  toast.appendChild(undoBtn);
+  toast.className = 'toast';
+  void toast.offsetWidth;
+  toast.classList.add('show');
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 4500);
+}
+
+// ── Save indicator ────────────────────────────────────────────────────────────
+let saveIndicatorTimer = null;
+
+function showSaveIndicator(state) {
+  const ind = document.getElementById('saveIndicator');
+  if (!ind) return;
+  clearTimeout(saveIndicatorTimer);
+  ind.className = 'save-indicator ' + state;
+  if (state === 'saved') {
+    saveIndicatorTimer = setTimeout(() => { ind.className = 'save-indicator'; }, 1500);
+  }
+}
+
 // ── Load stored values on popup open ─────────────────────────────────────────
-chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 'blockedSites'], data => {
+chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 'blockedSites', 'onboardingSeen'], data => {
   if (data.profiles && data.profiles.length > 0) {
     profiles = data.profiles;
     activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
   } else {
-    // Migration: build first profile from legacy flat storage
     const p = emptyProfile('Default');
     PROFILE_KEYS.forEach(k => { p[k] = data[k] || ''; });
     profiles = [p];
@@ -92,7 +126,26 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 
   if (data.apiKey) document.getElementById('apiKey').value = data.apiKey;
   document.getElementById('floatingBtn').checked = !!data.floatingBtn;
   if (data.blockedSites) document.getElementById('blockedSites').value = data.blockedSites.join('\n');
+
+  // Show onboarding banner if first run (all fields empty, never seen)
+  if (!data.onboardingSeen) {
+    const allEmpty = PROFILE_KEYS.every(k => !profiles[activeProfile][k]);
+    if (allEmpty) {
+      const banner = document.getElementById('onboardingBanner');
+      if (banner) banner.style.display = 'block';
+    }
+  }
 });
+
+// ── Onboarding banner dismiss ─────────────────────────────────────────────────
+const dismissBtn = document.getElementById('dismissOnboarding');
+if (dismissBtn) {
+  dismissBtn.addEventListener('click', () => {
+    const banner = document.getElementById('onboardingBanner');
+    if (banner) banner.style.display = 'none';
+    chrome.storage.local.set({ onboardingSeen: true });
+  });
+}
 
 // ── Profile selector ──────────────────────────────────────────────────────────
 document.getElementById('profileSelect').addEventListener('change', e => {
@@ -103,15 +156,42 @@ document.getElementById('profileSelect').addEventListener('change', e => {
 });
 
 document.getElementById('newProfile').addEventListener('click', () => {
-  const name = window.prompt('Profile name:', `Profile ${profiles.length + 1}`);
-  if (!name) return;
+  const raw = window.prompt('Profile name:', `Profile ${profiles.length + 1}`);
+  if (raw === null) return; // cancelled
+  const name = raw.trim();
+  if (!name) {
+    showToast('Name cannot be empty', true);
+    return;
+  }
+  if (profiles.some(p => p.name.toLowerCase() === name.toLowerCase())) {
+    showToast('A profile with that name already exists', true);
+    return;
+  }
   readFormIntoProfile();
-  const newProf = emptyProfile(name.trim());
+  const newProf = emptyProfile(name);
   profiles.push(newProf);
   activeProfile = profiles.length - 1;
   populateProfileSelect();
   loadProfileIntoForm(profiles[activeProfile]);
   saveProfiles();
+});
+
+document.getElementById('renameProfile').addEventListener('click', () => {
+  const current = profiles[activeProfile].name || `Profile ${activeProfile + 1}`;
+  const raw = window.prompt('Rename profile:', current);
+  if (raw === null) return;
+  const name = raw.trim();
+  if (!name) {
+    showToast('Name cannot be empty', true);
+    return;
+  }
+  if (profiles.some((p, i) => i !== activeProfile && p.name.toLowerCase() === name.toLowerCase())) {
+    showToast('A profile with that name already exists', true);
+    return;
+  }
+  profiles[activeProfile].name = name;
+  populateProfileSelect();
+  saveProfiles(() => showToast('Profile renamed'));
 });
 
 document.getElementById('deleteProfile').addEventListener('click', () => {
@@ -130,7 +210,6 @@ document.getElementById('deleteProfile').addEventListener('click', () => {
 
 // ── Save Details ──────────────────────────────────────────────────────────────
 document.getElementById('saveDetails').addEventListener('click', () => {
-  // yearsExp validation
   const yearsExpEl = document.getElementById('yearsExp');
   const yearsExpVal = yearsExpEl ? yearsExpEl.value.trim() : '';
   const exp = parseInt(yearsExpVal, 10);
@@ -139,9 +218,9 @@ document.getElementById('saveDetails').addEventListener('click', () => {
     return;
   }
 
+  clearTimeout(autoSaveTimer); // flush any pending auto-save
   readFormIntoProfile();
   if (yearsExpVal !== '') profiles[activeProfile].yearsExp = isNaN(exp) ? '' : String(exp);
-
   saveProfiles(() => showToast('Details saved'));
 });
 
@@ -152,8 +231,27 @@ document.getElementById('saveApiKey').addEventListener('click', () => {
     showToast('Enter an API key first', true);
     return;
   }
-  chrome.storage.local.set({ apiKey }, () => {
-    showToast('API key saved');
+  chrome.storage.local.set({ apiKey }, () => showToast('API key saved'));
+});
+
+// ── Test API Key ──────────────────────────────────────────────────────────────
+document.getElementById('testApiKey').addEventListener('click', () => {
+  const apiKey = document.getElementById('apiKey').value.trim();
+  if (!apiKey) {
+    showToast('Enter an API key first', true);
+    return;
+  }
+  const btn = document.getElementById('testApiKey');
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  chrome.runtime.sendMessage({ action: 'testApiKey', apiKey }, response => {
+    btn.disabled = false;
+    btn.textContent = 'Test';
+    if (response && response.ok) {
+      showToast('API key is valid ✓');
+    } else {
+      showToast((response && response.error) || 'API key test failed', true);
+    }
   });
 });
 
@@ -175,8 +273,7 @@ document.getElementById('floatingBtn').addEventListener('change', e => {
   chrome.storage.local.set({ floatingBtn: enabled }, () => {
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, { action: 'toggleFloatingBtn', enabled })
-          .catch(() => {});
+        chrome.tabs.sendMessage(tabs[0].id, { action: 'toggleFloatingBtn', enabled }).catch(() => {});
       }
     });
   });
@@ -200,6 +297,9 @@ document.getElementById('addCurrentSite').addEventListener('click', () => {
       if (!sites.includes(url.hostname)) {
         sites.push(url.hostname);
         textarea.value = sites.join('\n');
+        showToast(`Added ${url.hostname}`);
+      } else {
+        showToast('Site already blocked');
       }
     } catch {}
   });
@@ -220,7 +320,7 @@ document.getElementById('exportData').addEventListener('click', () => {
     a.download = 'fillr-backup.json';
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Exported successfully');
+    showToast('Exported (API key not included)');
   });
 });
 
@@ -256,61 +356,101 @@ document.getElementById('importFile').addEventListener('change', e => {
   e.target.value = '';
 });
 
-// ── Fill This Page ────────────────────────────────────────────────────────────
+// ── Fill trigger ──────────────────────────────────────────────────────────────
 let isFilling = false;
+let lastFillTabId = null;
 
 function triggerFill() {
   if (isFilling) return;
   isFilling = true;
 
-  const fillBtn = document.getElementById('fillPage');
   const fillBtnTop = document.getElementById('fillPageTop');
-  if (fillBtn) { fillBtn.disabled = true; fillBtn.textContent = 'Filling…'; }
   if (fillBtnTop) fillBtnTop.disabled = true;
 
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
     function resetButtons() {
       isFilling = false;
-      if (fillBtn) { fillBtn.disabled = false; fillBtn.textContent = 'Fill This Page'; }
       if (fillBtnTop) fillBtnTop.disabled = false;
     }
 
     if (!tabs[0]) { resetButtons(); return; }
+    lastFillTabId = tabs[0].id;
+
+    // 12-second timeout so the button never hangs
+    const timeout = setTimeout(() => {
+      resetButtons();
+      showToast('Page took too long — try refreshing');
+    }, 12000);
 
     chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' }, response => {
+      clearTimeout(timeout);
       resetButtons();
       if (chrome.runtime.lastError) {
         showToast('Cannot fill this page', true);
         return;
       }
-      if (response && response.filled !== undefined) {
-        if (response.apiError) {
-          showToast(response.apiError, true);
-        } else if (response.filled === 0) {
-          showToast('No fillable fields found', true);
+      if (!response || response.filled === undefined) return;
+
+      if (response.blocked) {
+        showToast('This site is blocked — remove it in Settings', true);
+      } else if (response.apiError) {
+        showToast(response.apiError, true);
+      } else if (response.filled === 0) {
+        showToast('No fillable fields found');
+      } else {
+        const msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
+        if (response.hasUndo && lastFillTabId) {
+          showToastWithUndo(msg, () => {
+            chrome.tabs.sendMessage(lastFillTabId, { action: 'undoFill' }, r => {
+              if (r && r.restored > 0) showToast(`Undid ${r.restored} field${r.restored !== 1 ? 's' : ''}`);
+            });
+          });
         } else {
-          showToast(`Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`);
+          showToast(msg);
         }
       }
     });
   });
 }
 
-document.getElementById('fillPage').addEventListener('click', triggerFill);
 document.getElementById('fillPageTop').addEventListener('click', triggerFill);
+
+// Listen for progress updates from the content script during AI passes
+chrome.runtime.onMessage.addListener(message => {
+  if (message.action === 'fillProgress' && isFilling) {
+    const fillBtnTop = document.getElementById('fillPageTop');
+    if (fillBtnTop) {
+      // Update the hover-reveal span text so the button shows progress
+      const label = document.querySelector('#fillPageTop .btn-hover-label');
+      if (label) label.textContent = message.stage === 'ai-text' ? 'AI Match…' : 'AI Vision…';
+    }
+  }
+});
 
 // ── Auto-save on typing ───────────────────────────────────────────────────────
 let autoSaveTimer = null;
+
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
+  showSaveIndicator('saving');
   autoSaveTimer = setTimeout(() => {
     readFormIntoProfile();
-    saveProfiles();
+    saveProfiles(() => showSaveIndicator('saved'));
   }, 800);
 }
 
 document.getElementById('tab-details').querySelectorAll('input, textarea').forEach(el => {
   el.addEventListener('input', scheduleAutoSave);
+});
+
+// Flush auto-save immediately when popup is hidden (user closes it)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && autoSaveTimer) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+    readFormIntoProfile();
+    saveProfiles();
+  }
 });
 
 // ── Cmd/Ctrl+S shortcut ───────────────────────────────────────────────────────
