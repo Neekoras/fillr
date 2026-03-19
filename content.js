@@ -365,6 +365,7 @@ function fillField(el, value) {
 
   el.classList.add('autofill-highlight');
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   return true;
 }
 
