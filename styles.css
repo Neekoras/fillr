@@ -454,21 +454,6 @@ button:disabled,
   letter-spacing: 0.02em;
 }
 
-.api-key-row {
-  display: flex;
-  gap: 10px;
-  align-items: flex-end;
-}
-
-.api-key-row .form-group { flex: 1; }
-
-.api-key-row .btn {
-  height: 40px;
-  padding: 0 16px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
 /* ── Toggle ────────────────────────────────────────────────────────────────── */
 .toggle {
   position: relative;
@@ -726,4 +711,7 @@ input:checked + .toggle-slider:before {
   .card-wrap { box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
 
   .toast { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+
+  /* Ensure saved indicator is visible on white background (contrast >4.5:1) */
+  .save-indicator.saved { background: #2D8653; }
 }

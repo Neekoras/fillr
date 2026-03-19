@@ -45,20 +45,20 @@ function extractJSON(rawText) {
 const fillCache = new Map();
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
-function fingerprint(fields) {
-  return fields.map(f => `${f.id}|${f.name}|${f.type}`).sort().join(',');
+function fingerprint(fields, hostname) {
+  return (hostname || '') + ':' + fields.map(f => `${f.id}|${f.name}|${f.type}`).sort().join(',');
 }
 
-function getCached(fields) {
-  const key = fingerprint(fields);
+function getCached(fields, hostname) {
+  const key = fingerprint(fields, hostname);
   const entry = fillCache.get(key);
   if (!entry) return null;
   if (Date.now() - entry.ts > CACHE_TTL) { fillCache.delete(key); return null; }
   return entry.mapping;
 }
 
-function setCache(fields, mapping) {
-  fillCache.set(fingerprint(fields), { mapping, ts: Date.now() });
+function setCache(fields, mapping, hostname) {
+  fillCache.set(fingerprint(fields, hostname), { mapping, ts: Date.now() });
 }
 
 // ── Anthropic API call with retry + exponential backoff ────────────────────
@@ -137,11 +137,18 @@ function setBadge(count) {
 
 // ── Message listener ───────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only accept messages from this extension's own pages/content scripts
+  if (sender.id !== chrome.runtime.id) return;
+
   if (message.action === 'claudeFill') {
-    handleClaudeFill(message).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
+    // Must originate from a tab (content script), not an extension page
+    if (!sender.tab) { sendResponse({ error: 'Unauthorized' }); return; }
+    const tabHostname = (() => { try { return new URL(sender.tab.url).hostname; } catch { return ''; } })();
+    handleClaudeFill(message, tabHostname).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
     return true;
   }
   if (message.action === 'claudeVisionFill') {
+    if (!sender.tab) { sendResponse({ error: 'Unauthorized' }); return; }
     handleClaudeVisionFill({ ...message, windowId: sender.tab?.windowId }).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
     return true;
   }
@@ -203,11 +210,11 @@ async function testApiKey(apiKey) {
 }
 
 // ── Pass 3: Claude text fill ───────────────────────────────────────────────
-async function handleClaudeFill({ fields, profile, pageContext }) {
+async function handleClaudeFill({ fields, profile, pageContext }, hostname) {
   const { apiKey } = await chrome.storage.local.get('apiKey');
   if (!apiKey) return { error: 'No API key configured' };
 
-  const cached = getCached(fields);
+  const cached = getCached(fields, hostname);
   if (cached) return { mapping: cached };
 
   const { profileDesc, availableKeys } = buildProfileBlock(profile);
@@ -237,7 +244,7 @@ Example output:
 {"applicant_first": "firstName", "contact_email": "email", "is_founder": "Yes", "build_description": "I'm building an AI-powered form autofill extension that uses Claude to intelligently match and fill web forms, saving founders hours of repetitive application work."}`;
 
   const result = await callAnthropicAPI(apiKey, [{ role: 'user', content: prompt }]);
-  if (result.mapping) setCache(fields, result.mapping);
+  if (result.mapping) setCache(fields, result.mapping, hostname);
   return result;
 }
 

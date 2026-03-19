@@ -359,6 +359,7 @@ document.getElementById('importFile').addEventListener('change', e => {
 // ── Fill trigger ──────────────────────────────────────────────────────────────
 let isFilling = false;
 let lastFillTabId = null;
+let autoSaveTimer = null;
 
 function triggerFill() {
   if (isFilling) return;
@@ -401,9 +402,9 @@ function triggerFill() {
         const msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
         if (response.hasUndo && lastFillTabId) {
           showToastWithUndo(msg, () => {
-            chrome.tabs.sendMessage(lastFillTabId, { action: 'undoFill' }, r => {
-              if (r && r.restored > 0) showToast(`Undid ${r.restored} field${r.restored !== 1 ? 's' : ''}`);
-            });
+            chrome.tabs.sendMessage(lastFillTabId, { action: 'undoFill' })
+              .then(r => { if (r && r.restored > 0) showToast(`Undid ${r.restored} field${r.restored !== 1 ? 's' : ''}`); })
+              .catch(() => {});
           });
         } else {
           showToast(msg);
@@ -415,21 +416,17 @@ function triggerFill() {
 
 document.getElementById('fillPageTop').addEventListener('click', triggerFill);
 
-// Listen for progress updates from the content script during AI passes
-chrome.runtime.onMessage.addListener(message => {
+// Listen for progress updates from the content script during AI passes.
+// Store the reference so we can remove it when the popup is hidden.
+function progressListener(message) {
   if (message.action === 'fillProgress' && isFilling) {
-    const fillBtnTop = document.getElementById('fillPageTop');
-    if (fillBtnTop) {
-      // Update the hover-reveal span text so the button shows progress
-      const label = document.querySelector('#fillPageTop .btn-hover-label');
-      if (label) label.textContent = message.stage === 'ai-text' ? 'AI Match…' : 'AI Vision…';
-    }
+    const label = document.querySelector('#fillPageTop .btn-hover-label');
+    if (label) label.textContent = message.stage === 'ai-text' ? 'AI Match…' : 'AI Vision…';
   }
-});
+}
+chrome.runtime.onMessage.addListener(progressListener);
 
 // ── Auto-save on typing ───────────────────────────────────────────────────────
-let autoSaveTimer = null;
-
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   showSaveIndicator('saving');
@@ -443,13 +440,16 @@ document.getElementById('tab-details').querySelectorAll('input, textarea').forEa
   el.addEventListener('input', scheduleAutoSave);
 });
 
-// Flush auto-save immediately when popup is hidden (user closes it)
+// Flush auto-save and remove the progress listener when popup is hidden
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && autoSaveTimer) {
-    clearTimeout(autoSaveTimer);
-    autoSaveTimer = null;
-    readFormIntoProfile();
-    saveProfiles();
+  if (document.hidden) {
+    chrome.runtime.onMessage.removeListener(progressListener);
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+      readFormIntoProfile();
+      saveProfiles();
+    }
   }
 });
 

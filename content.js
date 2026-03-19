@@ -365,7 +365,6 @@ function fillField(el, value) {
 
   el.classList.add('autofill-highlight');
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
-  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   return true;
 }
 
@@ -428,14 +427,21 @@ function applyClaudeValue(el, claudeValue, profile) {
 // ── Undo stack ────────────────────────────────────────────────────────────────
 let undoStack = [];
 
+// ── Concurrent fill guard ─────────────────────────────────────────────────────
+let isFilling = false;
+
 // ── Main autofill function ────────────────────────────────────────────────────
 async function autofill() {
+  if (isFilling) return { filled: 0 };
+  isFilling = true;
   const storageData = await new Promise(resolve =>
     chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites'], resolve)
   );
 
-  const blockedSites = storageData.blockedSites || [];
-  if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) {
+  const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
+  const hostname = location.hostname.toLowerCase();
+  if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) {
+    isFilling = false;
     return { filled: 0, blocked: true };
   }
 
@@ -454,6 +460,7 @@ async function autofill() {
 
   const fields = collectFields();
   let filledCount = 0;
+  let firstFilledEl = null;
   const unmatched = [];
 
   // Snapshot original values for undo (before any fills)
@@ -470,7 +477,10 @@ async function autofill() {
     const profileKey = exactMatch(el) || fuzzyMatch(el);
     if (profileKey) {
       const val = profileValue(profile, profileKey);
-      if (val && fillField(el, val)) filledCount++;
+      if (val && fillField(el, val)) {
+        if (!firstFilledEl) firstFilledEl = el;
+        filledCount++;
+      }
     } else {
       unmatched.push(el);
     }
@@ -483,15 +493,17 @@ async function autofill() {
 
     let stillUnmatched = [...unmatched];
 
+    // Build once, reuse in both Pass 3 and Pass 4
+    const profileWithFullName = {
+      ...profile,
+      fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
+    };
+
     if (apiKey) {
       try {
         // Notify popup that Pass 3 is starting
         chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-text' }).catch(() => {});
 
-        const profileWithFullName = {
-          ...profile,
-          fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-        };
         const descriptors = unmatched.map(fieldDescriptor);
         const response = await chrome.runtime.sendMessage({
           action: 'claudeFill',
@@ -505,8 +517,12 @@ async function autofill() {
           for (const el of unmatched) {
             const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = response.mapping[key];
-            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) filledCount++;
-            else stillUnmatched.push(el);
+            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) {
+              if (!firstFilledEl) firstFilledEl = el;
+              filledCount++;
+            } else {
+              stillUnmatched.push(el);
+            }
           }
         } else if (response && response.error) {
           console.warn('[Autofill] Pass 3 error:', response.error);
@@ -522,10 +538,6 @@ async function autofill() {
         // Notify popup that Pass 4 is starting
         chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-vision' }).catch(() => {});
 
-        const profileWithFullName = {
-          ...profile,
-          fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-        };
         const descriptors = stillUnmatched.map(fieldDescriptor).slice(0, 20);
         const visionResponse = await chrome.runtime.sendMessage({
           action: 'claudeVisionFill',
@@ -537,7 +549,10 @@ async function autofill() {
           for (const el of stillUnmatched) {
             const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = visionResponse.mapping[key];
-            if (claudeVal) applyClaudeValue(el, claudeVal, profile) && filledCount++;
+            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) {
+              if (!firstFilledEl) firstFilledEl = el;
+              filledCount++;
+            }
           }
         } else if (visionResponse && visionResponse.error) {
           apiError = apiError || visionResponse.error;
@@ -558,6 +573,12 @@ async function autofill() {
     if (current !== original) undoStack.push({ el, original });
   }
 
+  // Scroll once to the first filled field (not per-field — prevents jarring multi-scroll)
+  if (firstFilledEl) {
+    firstFilledEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  isFilling = false;
   return { filled: filledCount, apiError, hasUndo: undoStack.length > 0 };
 }
 
@@ -570,9 +591,7 @@ function createFloatingButton() {
   if (document.getElementById('__autofill-float-btn__')) return;
   if (!hasFormElements()) return;
 
-  chrome.storage.local.get('blockedSites', ({ blockedSites = [] }) => {
-    if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) return;
-
+  {
     const btn = document.createElement('button');
     btn.id = '__autofill-float-btn__';
     btn.innerHTML = 'Autofill';
@@ -601,7 +620,7 @@ function createFloatingButton() {
       }
     });
     document.body.appendChild(btn);
-  });
+  }
 }
 
 function removeFloatingButton() {
