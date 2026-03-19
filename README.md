@@ -13,7 +13,7 @@ Fillr runs four passes when filling a page:
 3. **Claude AI (text)** — sends any unmatched fields to `claude-sonnet-4-6` along with your profile and page context (title, headings, nearby text). Claude returns a JSON mapping: profile keys for standard fields, or generated first-person answers for open-ended questions (e.g. "What will you build?").
 4. **Claude AI (vision)** — takes a screenshot of the visible tab and sends it alongside unmatched fields and page context to Claude's vision model for visual context. Same response format as Pass 3.
 
-Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independent — a failure in Pass 3 does not prevent Pass 4 from running.
+Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independent; a failure in Pass 3 does not prevent Pass 4 from running.
 
 ---
 
@@ -31,7 +31,7 @@ Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independ
 - `Cmd/Ctrl+S` saves the active tab (Details or Settings)
 - React-compatible field filling using native input setters and `InputEvent` so React's synthetic event system fires correctly
 - Optional floating button that appears on pages containing forms, with SPA navigation support via `MutationObserver`
-- Keyboard-accessible popup with ARIA roles, `aria-selected` tab state, and `focus-visible` gold outline ring
+- Keyboard-accessible pop up with ARIA roles, `aria-selected` tab state, and `focus-visible` gold outline ring
 - All API calls include a 30-second timeout via `AbortController`
 - API key is stored locally in `chrome.storage.local` and never transmitted in extension messages
 
@@ -42,7 +42,7 @@ Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independ
 1. Clone or download this repository.
 2. Open `chrome://extensions` in Chrome.
 3. Enable **Developer mode** (top right toggle).
-4. Click **Load unpacked** and select the extension folder.
+4. Click **Load unpacked** and select the extension folder of this repository.
 5. Open the Fillr popup, go to **Settings**, paste your [Anthropic API key](https://console.anthropic.com/), and click **Save**.
 6. Fill in your details on the **My Details** tab — fields save automatically as you type.
 
