@@ -209,7 +209,7 @@ function collectFields() {
       : el.textContent;
     if (stripInvisible(currentVal) !== '') return false;
     const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     return true;
   });
 }
@@ -323,7 +323,7 @@ function fuzzyMatch(el) {
 
 // ── Fill a single field ───────────────────────────────────────────────────────
 function fillField(el, value) {
-  if (!value && value !== 0) return false;
+  if (value === null || value === undefined) return false;
 
   const strVal = String(value);
   const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '';
@@ -434,6 +434,7 @@ let isFilling = false;
 async function autofill() {
   if (isFilling) return { filled: 0 };
   isFilling = true;
+  try {
   const storageData = await new Promise(resolve =>
     chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites'], resolve)
   );
@@ -441,7 +442,6 @@ async function autofill() {
   const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
   const hostname = location.hostname.toLowerCase();
   if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) {
-    isFilling = false;
     return { filled: 0, blocked: true };
   }
 
@@ -578,8 +578,10 @@ async function autofill() {
     firstFilledEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  isFilling = false;
   return { filled: filledCount, apiError, hasUndo: undoStack.length > 0 };
+  } finally {
+    isFilling = false;
+  }
 }
 
 // ── Floating button ───────────────────────────────────────────────────────────
@@ -591,7 +593,10 @@ function createFloatingButton() {
   if (document.getElementById('__autofill-float-btn__')) return;
   if (!hasFormElements()) return;
 
-  {
+  chrome.storage.local.get('blockedSites', ({ blockedSites = [] }) => {
+    const hostname = location.hostname.toLowerCase();
+    if (blockedSites.map(s => s.toLowerCase()).some(d => hostname === d || hostname.endsWith('.' + d))) return;
+
     const btn = document.createElement('button');
     btn.id = '__autofill-float-btn__';
     btn.innerHTML = 'Autofill';
@@ -620,7 +625,7 @@ function createFloatingButton() {
       }
     });
     document.body.appendChild(btn);
-  }
+  });
 }
 
 function removeFloatingButton() {

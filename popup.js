@@ -379,12 +379,17 @@ function triggerFill() {
 
     // 12-second timeout so the button never hangs
     const timeout = setTimeout(() => {
+      const label = document.querySelector('#fillPageTop .btn-hover-label');
+      if (label) label.textContent = 'Fill Out';
       resetButtons();
       showToast('Page took too long — try refreshing');
     }, 12000);
 
     chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' }, response => {
       clearTimeout(timeout);
+      // Reset progress label back to default before re-enabling
+      const label = document.querySelector('#fillPageTop .btn-hover-label');
+      if (label) label.textContent = 'Fill Out';
       resetButtons();
       if (chrome.runtime.lastError) {
         showToast('Cannot fill this page', true);
