@@ -58,7 +58,7 @@
 
 // ── Field selector constant ───────────────────────────────────────────────────
 const FIELD_SELECTOR = [
-  'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]):not([type=checkbox]):not([type=radio])',
+  'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file])',
   'textarea',
   'select',
   '[contenteditable="true"]',
@@ -172,6 +172,7 @@ function getProfile(data) {
     yearsExp: data.yearsExp || '',
     jobTitle: data.jobTitle || '',
     company: data.company || '',
+    context: data.context || '',
   };
 }
 
@@ -204,12 +205,19 @@ function collectFields() {
 
   return [...main, ...shadow].filter(el => {
     if (el.disabled || el.readOnly) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    if (el.type === 'checkbox') return !el.checked;
+    if (el.type === 'radio') {
+      if (!el.name) return false;
+      const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+      if (group.some(r => r.checked)) return false;
+      return group[0] === el;
+    }
     const currentVal = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
       ? el.value
       : el.textContent;
     if (stripInvisible(currentVal) !== '') return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     return true;
   });
 }
@@ -328,6 +336,35 @@ function fillField(el, value) {
   const strVal = String(value);
   const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '';
 
+  if (el.type === 'checkbox') {
+    const truthy = /^(yes|true|1|checked|on)$/i.test(strVal.trim());
+    el.checked = truthy;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.classList.add('autofill-highlight');
+    setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
+    return true;
+  }
+
+  if (el.type === 'radio') {
+    if (!el.name) return false;
+    const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+    // Empty string means undo — uncheck all
+    if (!strVal.trim()) {
+      group.forEach(r => { r.checked = false; r.dispatchEvent(new Event('change', { bubbles: true })); });
+      return true;
+    }
+    const lower = strVal.toLowerCase().trim();
+    const match = group.find(r => r.value.toLowerCase() === lower)
+      || group.find(r => getLabelText(r).toLowerCase() === lower)
+      || group.find(r => r.value.toLowerCase().includes(lower) || lower.includes(r.value.toLowerCase()));
+    if (!match) return false;
+    match.checked = true;
+    match.dispatchEvent(new Event('change', { bubbles: true }));
+    match.classList.add('autofill-highlight');
+    setTimeout(() => match.classList.remove('autofill-highlight'), 1500);
+    return true;
+  }
+
   if (isContentEditable) {
     el.focus();
     document.execCommand('selectAll', false, null);
@@ -410,6 +447,11 @@ function fieldDescriptor(el) {
       .map(o => o.text.trim())
       .slice(0, 30);
   }
+  if (el.type === 'radio' && el.name) {
+    const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+    desc.options = Array.from(group).map(r => getLabelText(r) || r.value);
+    desc.type = 'radio-group';
+  }
   return desc;
 }
 
@@ -436,7 +478,7 @@ async function autofill() {
   isFilling = true;
   try {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites'], resolve)
+    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments'], resolve)
   );
 
   const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
@@ -448,7 +490,11 @@ async function autofill() {
   let profileData;
   const profiles = storageData.profiles;
   if (profiles && profiles.length > 0) {
-    const activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
+    const siteAssignments = storageData.siteAssignments || {};
+    let activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
+    if (siteAssignments[hostname] !== undefined) {
+      activeIdx = Math.min(siteAssignments[hostname], profiles.length - 1);
+    }
     profileData = profiles[activeIdx];
   } else {
     profileData = storageData;
@@ -466,8 +512,15 @@ async function autofill() {
   // Snapshot original values for undo (before any fills)
   const originalValues = new Map();
   for (const el of fields) {
-    originalValues.set(el, el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-      ? el.value : el.textContent);
+    if (el.type === 'checkbox') {
+      originalValues.set(el, el.checked ? 'checked' : 'unchecked');
+    } else if (el.type === 'radio' && el.name) {
+      const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      originalValues.set(el, Array.from(group).find(r => r.checked)?.value || '');
+    } else {
+      originalValues.set(el, el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        ? el.value : el.textContent);
+    }
   }
 
   // Pre-populate label cache for all fields in one pass
@@ -568,8 +621,16 @@ async function autofill() {
   // Build undo stack — only fields whose value actually changed
   undoStack = [];
   for (const [el, original] of originalValues) {
-    const current = el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-      ? el.value : el.textContent;
+    let current;
+    if (el.type === 'checkbox') {
+      current = el.checked ? 'checked' : 'unchecked';
+    } else if (el.type === 'radio' && el.name) {
+      const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      current = Array.from(group).find(r => r.checked)?.value || '';
+    } else {
+      current = el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        ? el.value : el.textContent;
+    }
     if (current !== original) undoStack.push({ el, original });
   }
 

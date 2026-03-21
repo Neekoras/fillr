@@ -5,12 +5,18 @@ const PROFILE_KEYS = [
   'email', 'phone',
   'address1', 'address2', 'city', 'state', 'zip', 'country',
   'linkedin', 'github', 'website', 'twitter', 'instagram', 'bio',
-  'yearsExp', 'jobTitle', 'company'
+  'yearsExp', 'jobTitle', 'company', 'context'
 ];
 
 // ── Multi-profile state ───────────────────────────────────────────────────────
 let profiles = [];
 let activeProfile = 0;
+
+// ── Answer library state ──────────────────────────────────────────────────────
+let answerLibrary = [];
+
+// ── Site assignments state ────────────────────────────────────────────────────
+let siteAssignments = {};
 
 function emptyProfile(name) {
   const p = { name };
@@ -109,7 +115,7 @@ function showSaveIndicator(state) {
 }
 
 // ── Load stored values on popup open ─────────────────────────────────────────
-chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 'blockedSites', 'onboardingSeen'], data => {
+chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'answerLibrary', 'siteAssignments'], data => {
   if (data.profiles && data.profiles.length > 0) {
     profiles = data.profiles;
     activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
@@ -120,12 +126,31 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 
     activeProfile = 0;
   }
 
+  answerLibrary = data.answerLibrary || [];
+  siteAssignments = data.siteAssignments || {};
+
   populateProfileSelect();
   loadProfileIntoForm(profiles[activeProfile]);
 
   if (data.apiKey) document.getElementById('apiKey').value = data.apiKey;
   document.getElementById('floatingBtn').checked = !!data.floatingBtn;
   if (data.blockedSites) document.getElementById('blockedSites').value = data.blockedSites.join('\n');
+
+  renderAnswerList();
+  populateSiteAssignSelect();
+  renderSiteAssignList();
+
+  // Load current site's assignment
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (!tabs[0]) return;
+    try {
+      const hostname = new URL(tabs[0].url).hostname;
+      document.getElementById('siteAssignDomain').textContent = hostname;
+      const sel = document.getElementById('siteAssignProfile');
+      const assigned = siteAssignments[hostname];
+      sel.value = assigned !== undefined ? String(assigned) : '';
+    } catch {}
+  });
 
   // Show onboarding banner if first run (all fields empty, never seen)
   if (!data.onboardingSeen) {
@@ -307,11 +332,13 @@ document.getElementById('addCurrentSite').addEventListener('click', () => {
 
 // ── Import / Export ───────────────────────────────────────────────────────────
 document.getElementById('exportData').addEventListener('click', () => {
-  chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites'], data => {
+  chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'answerLibrary', 'siteAssignments'], data => {
     const exportObj = {
       profiles: data.profiles || profiles,
       activeProfile: data.activeProfile ?? activeProfile,
-      blockedSites: data.blockedSites || []
+      blockedSites: data.blockedSites || [],
+      answerLibrary: data.answerLibrary || [],
+      siteAssignments: data.siteAssignments || {}
     };
     const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -342,10 +369,14 @@ document.getElementById('importFile').addEventListener('change', e => {
       profiles = data.profiles;
       activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
       const blockedSites = data.blockedSites || [];
-      chrome.storage.local.set({ profiles, activeProfile, blockedSites }, () => {
+      answerLibrary = data.answerLibrary || [];
+      siteAssignments = data.siteAssignments || {};
+      chrome.storage.local.set({ profiles, activeProfile, blockedSites, answerLibrary, siteAssignments }, () => {
         populateProfileSelect();
         loadProfileIntoForm(profiles[activeProfile]);
         document.getElementById('blockedSites').value = blockedSites.join('\n');
+        renderAnswerList();
+        renderSiteAssignList();
         showToast('Imported successfully');
       });
     } catch {
@@ -354,6 +385,129 @@ document.getElementById('importFile').addEventListener('change', e => {
   };
   reader.readAsText(file);
   e.target.value = '';
+});
+
+// ── Answer Library ────────────────────────────────────────────────────────────
+function renderAnswerList() {
+  const list = document.getElementById('answerList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (answerLibrary.length === 0) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.style.marginTop = '8px';
+    hint.textContent = 'No saved answers yet. Add one to help Claude fill open-ended questions verbatim.';
+    list.appendChild(hint);
+    return;
+  }
+  answerLibrary.forEach(({ question, answer }, i) => {
+    const item = document.createElement('div');
+    item.className = 'answer-item';
+
+    const content = document.createElement('div');
+    content.className = 'answer-item-content';
+
+    const qDiv = document.createElement('div');
+    qDiv.className = 'answer-question';
+    qDiv.textContent = question;
+
+    const aDiv = document.createElement('div');
+    aDiv.className = 'answer-answer';
+    aDiv.textContent = answer;
+
+    content.appendChild(qDiv);
+    content.appendChild(aDiv);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-icon answer-delete';
+    delBtn.setAttribute('aria-label', 'Delete answer');
+    delBtn.title = 'Delete';
+    delBtn.textContent = '×';
+    delBtn.addEventListener('click', () => {
+      answerLibrary.splice(i, 1);
+      chrome.storage.local.set({ answerLibrary });
+      renderAnswerList();
+    });
+
+    item.appendChild(content);
+    item.appendChild(delBtn);
+    list.appendChild(item);
+  });
+}
+
+document.getElementById('addAnswer').addEventListener('click', () => {
+  const question = window.prompt('Question (e.g. "Why do you want to join?"):');
+  if (question === null || !question.trim()) return;
+  const answer = window.prompt('Your answer:');
+  if (answer === null || !answer.trim()) return;
+  answerLibrary.push({ question: question.trim(), answer: answer.trim() });
+  chrome.storage.local.set({ answerLibrary });
+  renderAnswerList();
+  showToast('Answer saved');
+});
+
+// ── Site Assignments ──────────────────────────────────────────────────────────
+function populateSiteAssignSelect() {
+  const sel = document.getElementById('siteAssignProfile');
+  if (!sel) return;
+  // Keep the "Auto" option, repopulate profiles
+  sel.innerHTML = '<option value="">Auto</option>';
+  profiles.forEach((p, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = p.name || `Profile ${i + 1}`;
+    sel.appendChild(opt);
+  });
+}
+
+function renderSiteAssignList() {
+  const list = document.getElementById('siteAssignList');
+  if (!list) return;
+  list.innerHTML = '';
+  const entries = Object.entries(siteAssignments);
+  entries.forEach(([domain, profileIdx]) => {
+    const row = document.createElement('div');
+    row.className = 'site-assign-saved-row';
+
+    const domainSpan = document.createElement('span');
+    domainSpan.className = 'site-assign-domain';
+    domainSpan.textContent = domain;
+
+    const profileSpan = document.createElement('span');
+    profileSpan.className = 'site-assign-profile-name';
+    profileSpan.textContent = profiles[profileIdx]?.name || `Profile ${profileIdx + 1}`;
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-sm btn-ghost';
+    delBtn.textContent = 'Remove';
+    delBtn.addEventListener('click', () => {
+      delete siteAssignments[domain];
+      chrome.storage.local.set({ siteAssignments });
+      renderSiteAssignList();
+      showToast(`Removed assignment for ${domain}`);
+    });
+
+    row.appendChild(domainSpan);
+    row.appendChild(profileSpan);
+    row.appendChild(delBtn);
+    list.appendChild(row);
+  });
+}
+
+document.getElementById('siteAssignSave').addEventListener('click', () => {
+  const domain = document.getElementById('siteAssignDomain').textContent;
+  if (!domain || domain === '—') return;
+  const sel = document.getElementById('siteAssignProfile');
+  if (sel.value === '') {
+    delete siteAssignments[domain];
+    showToast(`Assignment removed for ${domain}`);
+  } else {
+    siteAssignments[domain] = parseInt(sel.value, 10);
+    const profileName = profiles[siteAssignments[domain]]?.name || `Profile ${siteAssignments[domain] + 1}`;
+    showToast(`${domain} → ${profileName}`);
+  }
+  chrome.storage.local.set({ siteAssignments });
+  renderSiteAssignList();
 });
 
 // ── Fill trigger ──────────────────────────────────────────────────────────────

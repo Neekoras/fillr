@@ -38,6 +38,7 @@
       <span id="saveIndicator" class="save-indicator" aria-hidden="true"></span>
     </button>
     <button class="tab-btn" data-tab="settings" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
+    <button class="tab-btn" data-tab="answers" role="tab" id="tab-btn-answers" aria-selected="false" aria-controls="tab-answers">Answers</button>
   </div>
 
   <!-- Tab 1: My Details -->
@@ -138,6 +139,14 @@
       </div>
     </div>
 
+    <p class="section-title">Context for AI</p>
+    <div class="form-grid">
+      <div class="form-group full-width">
+        <label for="context">Additional Context</label>
+        <textarea id="context" placeholder="Tell Claude about your startup, goals, background — anything that helps it write better answers" style="min-height:80px"></textarea>
+      </div>
+    </div>
+
     <div class="btn-row">
       <button class="btn btn-primary btn-full" id="saveDetails">Save Details</button>
     </div>
@@ -188,6 +197,19 @@
       </div>
     </div>
 
+    <p class="section-title">Site Assignments</p>
+    <div class="settings-group">
+      <div class="site-assign-row" id="siteAssignCurrentRow">
+        <span class="site-assign-domain" id="siteAssignDomain">—</span>
+        <select id="siteAssignProfile" class="site-assign-select" aria-label="Profile for this site">
+          <option value="">Auto</option>
+        </select>
+        <button class="btn btn-sm btn-primary" id="siteAssignSave">Assign</button>
+      </div>
+      <div id="siteAssignList"></div>
+      <p class="hint">Automatically use a profile when visiting a site.</p>
+    </div>
+
     <p class="section-title">Data</p>
     <div class="settings-group">
       <div class="btn-row-inline">
@@ -198,6 +220,15 @@
       <p class="hint">Backup includes profiles and blocked sites. API key is not exported.</p>
     </div>
 
+  </div>
+
+  <!-- Tab 3: Answers -->
+  <div class="tab-content" id="tab-answers" role="tabpanel" aria-labelledby="tab-btn-answers">
+    <div class="answers-header">
+      <p class="section-title" style="margin-top:0">Saved Answers</p>
+      <button class="btn btn-sm btn-primary" id="addAnswer">+ Add</button>
+    </div>
+    <div id="answerList"></div>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
