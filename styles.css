@@ -817,6 +817,79 @@ input:checked + .toggle-slider:before {
   color: var(--error);
 }
 
+.signup-status-warn {
+  background: rgba(224, 192, 110, 0.10);
+  border: 1px solid rgba(224, 192, 110, 0.40);
+  color: #E0C06E;
+}
+
+/* ── Signup History ────────────────────────────────────────────────────────── */
+.signup-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18px;
+}
+
+.signup-history-header .section-title { margin: 0; }
+
+.btn-link {
+  background: none;
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #333;
+  cursor: pointer;
+  padding: 2px 0;
+  letter-spacing: 0.04em;
+  transition: color var(--transition);
+}
+
+.btn-link:hover { color: var(--text-muted); }
+
+.signup-history {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.history-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.history-dot-confirmed { background: #6FCF97; }
+.history-dot-submitted { background: #A8D5A2; }
+.history-dot-failed    { background: #E07070; }
+.history-dot-captcha   { background: #E0C06E; }
+
+.history-domain {
+  flex: 1;
+  color: #E8E6F0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.history-meta {
+  color: #444;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */
 .tab-content::-webkit-scrollbar { width: 3px; }
 .tab-content::-webkit-scrollbar-track { background: transparent; }

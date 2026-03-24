@@ -665,39 +665,58 @@ function findSubmitButton() {
     .find(b => isVisibleEl(b) && keywords.test(b.textContent.trim())) || null;
 }
 
+// Pre-flight CAPTCHA detection
+function hasCaptcha() {
+  return !!(
+    document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]') ||
+    document.querySelector('.cf-turnstile') ||
+    document.querySelector('[data-sitekey]')
+  );
+}
+
 function detectSignupSuccess() {
   const text = document.body.innerText;
   return /you.?re (registered|going|in)|registered!|see you there|confirmed|you.?re set|success/i.test(text);
 }
 
-// Multi-step fill+submit loop (handles Luma's email→name two-step flow)
+// Multi-step fill+submit loop (handles Luma's email→name two-step flow).
+// Returns { submitted, confirmed, filled } or { captcha: true }.
 async function fillAndSubmit() {
+  if (hasCaptcha()) return { captcha: true };
+
   let totalFilled = 0;
+  let submitted = false;
 
   for (let step = 0; step < 3; step++) {
-    if (detectSignupSuccess()) break;
+    if (detectSignupSuccess()) { submitted = true; break; }
 
     const result = await autofill();
     totalFilled += result.filled;
 
-    // If nothing was filled on step > 0, the form isn't progressing
+    // No new fields on step > 0 means the form isn't advancing
     if (result.filled === 0 && step > 0) break;
 
-    // Wait for React to process our fills
+    // Wait for React to process fills
     await new Promise(r => setTimeout(r, 600));
 
     const btn = findSubmitButton();
     if (!btn) break;
 
+    const urlBefore = location.href;
     btn.click();
+    submitted = true;
 
-    // Wait for the page to react (navigate or update DOM)
+    // Wait for the page to react
     await new Promise(r => setTimeout(r, 3000));
 
-    if (detectSignupSuccess()) return { success: true, filled: totalFilled };
+    // Secondary success signal: URL change post-submit
+    const urlChanged = location.href !== urlBefore;
+    if (urlChanged || detectSignupSuccess()) {
+      return { submitted: true, confirmed: true, filled: totalFilled };
+    }
   }
 
-  return { success: detectSignupSuccess(), filled: totalFilled };
+  return { submitted, confirmed: detectSignupSuccess(), filled: totalFilled };
 }
 
 // ── Floating button ───────────────────────────────────────────────────────────

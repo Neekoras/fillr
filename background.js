@@ -135,36 +135,48 @@ async function callAnthropicAPI(apiKey, messages) {
 }
 
 // ── Quick Signup ───────────────────────────────────────────────────────────
-// Poll until content.js is alive in the tab (it's injected at document_idle,
-// so we retry until the ping succeeds rather than relying on onUpdated).
-function waitForContentScript(tabId, timeout = 20000) {
+// Exponential backoff poll: 200ms → 400 → 800 → 1600 → 3000ms (cap), 10 attempts max.
+// Distinguishes tab-closed ("Signup cancelled.") from timeout ("Page took too long…").
+function waitForContentScript(tabId) {
   return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeout;
-    function attempt() {
-      if (Date.now() > deadline) { reject(new Error('Page took too long to load')); return; }
+    let attempt = 0;
+    const MAX_ATTEMPTS = 10;
+    const BASE = 200;
+    const CAP = 3000;
+
+    function tryPing() {
       chrome.tabs.sendMessage(tabId, { action: 'ping' }, response => {
-        if (!chrome.runtime.lastError && response && response.ok) { resolve(); return; }
-        setTimeout(attempt, 600);
+        const err = chrome.runtime.lastError;
+        if (!err && response && response.ok) { resolve(); return; }
+        if (err && /no tab|closed|removed/i.test(err.message || '')) {
+          reject(new Error('Signup cancelled.'));
+          return;
+        }
+        attempt++;
+        if (attempt >= MAX_ATTEMPTS) {
+          reject(new Error('Page took too long to load — try again.'));
+          return;
+        }
+        setTimeout(tryPing, Math.min(BASE * Math.pow(2, attempt - 1), CAP));
       });
     }
-    attempt();
+    tryPing();
   });
 }
 
 async function handleQuickSignup(url) {
+  try { new URL(url); } catch { return { error: 'Invalid URL' }; }
+
   let tabId;
   try {
-    // Validate URL
-    new URL(url);
-  } catch {
-    return { error: 'Invalid URL' };
-  }
-
-  try {
-    const tab = await chrome.tabs.create({ url, active: false });
+    let tab;
+    try {
+      tab = await chrome.tabs.create({ url, active: false });
+    } catch {
+      return { error: 'Signup cancelled.' };
+    }
     tabId = tab.id;
 
-    // Notify popup of progress
     chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'loading' }).catch(() => {});
 
     await waitForContentScript(tabId);
@@ -172,19 +184,23 @@ async function handleQuickSignup(url) {
     chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'filling' }).catch(() => {});
 
     const result = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Signup timed out')), 30000);
+      const timer = setTimeout(() => reject(new Error('Signup timed out — try again.')), 30000);
       chrome.tabs.sendMessage(tabId, { action: 'fillAndSubmit' }, response => {
         clearTimeout(timer);
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(response);
+        if (chrome.runtime.lastError) {
+          const msg = chrome.runtime.lastError.message || '';
+          reject(new Error(/no tab|closed|removed/i.test(msg) ? 'Signup cancelled.' : msg));
+        } else {
+          resolve(response);
+        }
       });
     });
 
-    return result || { success: false, error: 'No response from page' };
+    return result || { error: 'No response from page' };
   } catch (err) {
-    return { error: err.message };
+    return { error: err.message || 'Signup failed' };
   } finally {
-    if (tabId) chrome.tabs.remove(tabId).catch(() => {});
+    if (tabId !== undefined) chrome.tabs.remove(tabId).catch(() => {});
   }
 }
 

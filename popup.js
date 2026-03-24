@@ -115,7 +115,7 @@ function showSaveIndicator(state) {
 }
 
 // ── Load stored values on popup open ─────────────────────────────────────────
-chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'answerLibrary', 'siteAssignments'], data => {
+chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'answerLibrary', 'siteAssignments', 'signupHistory'], data => {
   if (data.profiles && data.profiles.length > 0) {
     profiles = data.profiles;
     activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
@@ -128,6 +128,7 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 
 
   answerLibrary = data.answerLibrary || [];
   siteAssignments = data.siteAssignments || {};
+  signupHistory = data.signupHistory || [];
 
   populateProfileSelect();
   loadProfileIntoForm(profiles[activeProfile]);
@@ -139,6 +140,7 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'floatingBtn', 
   renderAnswerList();
   populateSiteAssignSelect();
   renderSiteAssignList();
+  renderSignupHistory(signupHistory);
 
   // Load current site's assignment
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
@@ -510,6 +512,68 @@ document.getElementById('siteAssignSave').addEventListener('click', () => {
   renderSiteAssignList();
 });
 
+// ── Signup History ────────────────────────────────────────────────────────────
+let signupHistory = [];
+
+function formatHistoryTime(ts) {
+  const d = new Date(ts);
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  return `${date}, ${time}`;
+}
+
+function renderSignupHistory(history) {
+  const section = document.getElementById('signupHistorySection');
+  const list = document.getElementById('signupHistory');
+  if (!section || !list) return;
+  if (!history || history.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+  list.innerHTML = '';
+  history.forEach(({ url, timestamp, status, filled }) => {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+
+    const dot = document.createElement('span');
+    dot.className = `history-dot history-dot-${status}`;
+    dot.setAttribute('aria-hidden', 'true');
+
+    const domain = document.createElement('span');
+    domain.className = 'history-domain';
+    domain.textContent = url;
+    domain.title = url;
+
+    const meta = document.createElement('span');
+    meta.className = 'history-meta';
+    meta.textContent = `${formatHistoryTime(timestamp)} · ${filled}f`;
+
+    row.appendChild(dot);
+    row.appendChild(domain);
+    row.appendChild(meta);
+    list.appendChild(row);
+  });
+}
+
+function addToSignupHistory(rawUrl, status, filled) {
+  let displayUrl = rawUrl;
+  try {
+    const u = new URL(rawUrl);
+    displayUrl = u.hostname.replace(/^www\./, '') + u.pathname.replace(/\/$/, '');
+  } catch {}
+  signupHistory.unshift({ url: displayUrl, timestamp: Date.now(), status, filled });
+  if (signupHistory.length > 20) signupHistory.splice(20);
+  chrome.storage.local.set({ signupHistory });
+  renderSignupHistory(signupHistory);
+}
+
+document.getElementById('clearHistory')?.addEventListener('click', () => {
+  signupHistory = [];
+  chrome.storage.local.set({ signupHistory });
+  renderSignupHistory(signupHistory);
+});
+
 // ── Quick Signup ──────────────────────────────────────────────────────────────
 (function () {
   const btn = document.getElementById('signupBtn');
@@ -517,13 +581,13 @@ document.getElementById('siteAssignSave').addEventListener('click', () => {
   const statusEl = document.getElementById('signupStatus');
   let isRunning = false;
 
-  function setStatus(msg, isError = false) {
+  function setStatus(msg, variant = 'ok') {
+    // variant: 'ok' | 'error' | 'warn'
     statusEl.textContent = msg;
-    statusEl.className = 'signup-status' + (isError ? ' signup-status-error' : ' signup-status-ok');
+    statusEl.className = `signup-status signup-status-${variant}`;
     statusEl.style.display = msg ? 'block' : 'none';
   }
 
-  // Progress updates from background while signup is running
   function signupProgressListener(message) {
     if (!isRunning) return;
     if (message.action === 'signupProgress') {
@@ -532,7 +596,7 @@ document.getElementById('siteAssignSave').addEventListener('click', () => {
   }
   chrome.runtime.onMessage.addListener(signupProgressListener);
 
-  // Pre-fill with current tab URL if it looks like an event link
+  // Pre-fill URL if current tab looks like an event page
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
     if (!tabs[0]) return;
     try {
@@ -559,18 +623,41 @@ document.getElementById('siteAssignSave').addEventListener('click', () => {
       btn.textContent = 'Sign Up';
 
       if (!response) {
-        setStatus('No response — the page may have timed out.', true);
+        setStatus('No response — the page may have timed out.', 'error');
         return;
       }
+
+      // CAPTCHA detected — yellow warning, no red
+      if (response.captcha) {
+        setStatus('This page has a CAPTCHA — open it manually and use Fill Out instead.', 'warn');
+        addToSignupHistory(url, 'captcha', 0);
+        return;
+      }
+
+      // Hard error (tab create failed, timeout, cancelled, etc.)
       if (response.error) {
-        setStatus(response.error, true);
+        setStatus(response.error, 'error');
+        // Only log as failed if a fill wasn't attempted (error came before submission)
+        addToSignupHistory(url, 'failed', 0);
         return;
       }
-      if (response.success) {
-        setStatus(`Signed up! ${response.filled} field${response.filled !== 1 ? 's' : ''} filled.`);
+
+      const filled = response.filled || 0;
+
+      if (response.confirmed) {
+        // DOM text or URL change confirmed success
+        setStatus(`Signed up! ${filled} field${filled !== 1 ? 's' : ''} filled.`);
+        addToSignupHistory(url, 'confirmed', filled);
+        urlInput.value = '';
+      } else if (response.submitted) {
+        // Form was submitted but no DOM confirmation (email-verification flows)
+        setStatus('Submitted.');
+        addToSignupHistory(url, 'submitted', filled);
         urlInput.value = '';
       } else {
-        setStatus(`Filled ${response.filled || 0} field${response.filled !== 1 ? 's' : ''} but couldn't confirm signup — check your email or the site.`, true);
+        // Fill ran but submit button was never found/clicked
+        setStatus(`Couldn't submit the form — open it manually and use Fill Out instead.`, 'error');
+        addToSignupHistory(url, 'failed', filled);
       }
     });
   });
