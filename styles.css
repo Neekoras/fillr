@@ -794,6 +794,29 @@ input:checked + .toggle-slider:before {
 
 .site-assign-select:focus { border-color: var(--gold); }
 
+/* ── Quick Signup ──────────────────────────────────────────────────────────── */
+.signup-status {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border-radius: var(--radius-input);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+
+.signup-status-ok {
+  background: rgba(111, 207, 151, 0.10);
+  border: 1px solid rgba(111, 207, 151, 0.35);
+  color: #6FCF97;
+}
+
+.signup-status-error {
+  background: rgba(224, 112, 112, 0.08);
+  border: 1px solid var(--error-border);
+  color: var(--error);
+}
+
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */
 .tab-content::-webkit-scrollbar { width: 3px; }
 .tab-content::-webkit-scrollbar-track { background: transparent; }

@@ -134,6 +134,60 @@ async function callAnthropicAPI(apiKey, messages) {
   return { error: lastError };
 }
 
+// ── Quick Signup ───────────────────────────────────────────────────────────
+// Poll until content.js is alive in the tab (it's injected at document_idle,
+// so we retry until the ping succeeds rather than relying on onUpdated).
+function waitForContentScript(tabId, timeout = 20000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeout;
+    function attempt() {
+      if (Date.now() > deadline) { reject(new Error('Page took too long to load')); return; }
+      chrome.tabs.sendMessage(tabId, { action: 'ping' }, response => {
+        if (!chrome.runtime.lastError && response && response.ok) { resolve(); return; }
+        setTimeout(attempt, 600);
+      });
+    }
+    attempt();
+  });
+}
+
+async function handleQuickSignup(url) {
+  let tabId;
+  try {
+    // Validate URL
+    new URL(url);
+  } catch {
+    return { error: 'Invalid URL' };
+  }
+
+  try {
+    const tab = await chrome.tabs.create({ url, active: false });
+    tabId = tab.id;
+
+    // Notify popup of progress
+    chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'loading' }).catch(() => {});
+
+    await waitForContentScript(tabId);
+
+    chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'filling' }).catch(() => {});
+
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Signup timed out')), 30000);
+      chrome.tabs.sendMessage(tabId, { action: 'fillAndSubmit' }, response => {
+        clearTimeout(timer);
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(response);
+      });
+    });
+
+    return result || { success: false, error: 'No response from page' };
+  } catch (err) {
+    return { error: err.message };
+  } finally {
+    if (tabId) chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
 // ── Badge (debounced — prevents stacking on rapid fills) ──────────────────
 let badgeTimer = null;
 function setBadge(count) {
@@ -166,6 +220,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === 'testApiKey') {
     testApiKey(message.apiKey).then(sendResponse).catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (message.action === 'quickSignup') {
+    handleQuickSignup(message.url).then(sendResponse).catch(err => sendResponse({ error: err.message }));
     return true;
   }
 });

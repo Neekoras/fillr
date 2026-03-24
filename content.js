@@ -645,6 +645,61 @@ async function autofill() {
   }
 }
 
+// ── Quick signup helpers ──────────────────────────────────────────────────────
+function isVisibleEl(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && !el.disabled;
+}
+
+function findSubmitButton() {
+  // Prefer explicit submit buttons
+  const explicit = Array.from(
+    document.querySelectorAll('button[type=submit]:not(:disabled), input[type=submit]:not(:disabled)')
+  ).find(isVisibleEl);
+  if (explicit) return explicit;
+
+  // Fall back to keyword-matched buttons
+  const keywords = /register|sign\s*up|rsvp|submit|join|attend|confirm|continue|next/i;
+  return Array.from(document.querySelectorAll('button:not(:disabled), [role=button]'))
+    .find(b => isVisibleEl(b) && keywords.test(b.textContent.trim())) || null;
+}
+
+function detectSignupSuccess() {
+  const text = document.body.innerText;
+  return /you.?re (registered|going|in)|registered!|see you there|confirmed|you.?re set|success/i.test(text);
+}
+
+// Multi-step fill+submit loop (handles Luma's email→name two-step flow)
+async function fillAndSubmit() {
+  let totalFilled = 0;
+
+  for (let step = 0; step < 3; step++) {
+    if (detectSignupSuccess()) break;
+
+    const result = await autofill();
+    totalFilled += result.filled;
+
+    // If nothing was filled on step > 0, the form isn't progressing
+    if (result.filled === 0 && step > 0) break;
+
+    // Wait for React to process our fills
+    await new Promise(r => setTimeout(r, 600));
+
+    const btn = findSubmitButton();
+    if (!btn) break;
+
+    btn.click();
+
+    // Wait for the page to react (navigate or update DOM)
+    await new Promise(r => setTimeout(r, 3000));
+
+    if (detectSignupSuccess()) return { success: true, filled: totalFilled };
+  }
+
+  return { success: detectSignupSuccess(), filled: totalFilled };
+}
+
 // ── Floating button ───────────────────────────────────────────────────────────
 function hasFormElements() {
   return document.querySelectorAll('input:not([type=hidden]), textarea, select').length > 0;
@@ -746,5 +801,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.enabled) createFloatingButton();
     else removeFloatingButton();
     sendResponse({ ok: true });
+  }
+
+  if (message.action === 'ping') {
+    sendResponse({ ok: true });
+  }
+
+  if (message.action === 'fillAndSubmit') {
+    fillAndSubmit().then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
   }
 });

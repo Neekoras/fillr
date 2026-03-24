@@ -510,6 +510,72 @@ document.getElementById('siteAssignSave').addEventListener('click', () => {
   renderSiteAssignList();
 });
 
+// ── Quick Signup ──────────────────────────────────────────────────────────────
+(function () {
+  const btn = document.getElementById('signupBtn');
+  const urlInput = document.getElementById('signupUrl');
+  const statusEl = document.getElementById('signupStatus');
+  let isRunning = false;
+
+  function setStatus(msg, isError = false) {
+    statusEl.textContent = msg;
+    statusEl.className = 'signup-status' + (isError ? ' signup-status-error' : ' signup-status-ok');
+    statusEl.style.display = msg ? 'block' : 'none';
+  }
+
+  // Progress updates from background while signup is running
+  function signupProgressListener(message) {
+    if (!isRunning) return;
+    if (message.action === 'signupProgress') {
+      btn.textContent = message.stage === 'loading' ? 'Loading page…' : 'Filling form…';
+    }
+  }
+  chrome.runtime.onMessage.addListener(signupProgressListener);
+
+  // Pre-fill with current tab URL if it looks like an event link
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (!tabs[0]) return;
+    try {
+      const url = new URL(tabs[0].url);
+      if (/lu\.ma|eventbrite\.com|partiful\.com/i.test(url.hostname)) {
+        urlInput.value = tabs[0].url;
+      }
+    } catch {}
+  });
+
+  btn.addEventListener('click', () => {
+    const url = urlInput.value.trim();
+    if (!url) { showToast('Enter a URL first', true); return; }
+    try { new URL(url); } catch { showToast('Not a valid URL', true); return; }
+
+    isRunning = true;
+    btn.disabled = true;
+    btn.textContent = 'Opening page…';
+    setStatus('');
+
+    chrome.runtime.sendMessage({ action: 'quickSignup', url }, response => {
+      isRunning = false;
+      btn.disabled = false;
+      btn.textContent = 'Sign Up';
+
+      if (!response) {
+        setStatus('No response — the page may have timed out.', true);
+        return;
+      }
+      if (response.error) {
+        setStatus(response.error, true);
+        return;
+      }
+      if (response.success) {
+        setStatus(`Signed up! ${response.filled} field${response.filled !== 1 ? 's' : ''} filled.`);
+        urlInput.value = '';
+      } else {
+        setStatus(`Filled ${response.filled || 0} field${response.filled !== 1 ? 's' : ''} but couldn't confirm signup — check your email or the site.`, true);
+      }
+    });
+  });
+})();
+
 // ── Fill trigger ──────────────────────────────────────────────────────────────
 let isFilling = false;
 let lastFillTabId = null;
