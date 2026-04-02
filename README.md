@@ -1,30 +1,44 @@
 # Fillr
 
-A Chrome extension that automatically fills web forms using stored profile data, with Claude AI as a fallback for fields it cannot match by keyword.
+A Chrome extension that automatically fills web forms using stored profile data, with Claude AI (or Replicate Llama) as a fallback — matching profile fields for standard inputs, filling custom dropdowns, and generating context-aware answers for open-ended questions.
 
 ---
 
 ## How it works
 
-Fillr runs four passes when filling a page:
+Fillr runs five passes when filling a page:
 
 1. **Exact match** — normalizes the field's `name`, `id`, and `autocomplete` attribute and looks them up in a keyword map.
 2. **Fuzzy match** — searches the field's label, placeholder, `aria-label`, and nearby DOM text for known keywords using pre-compiled word-boundary regular expressions.
-3. **Claude AI (text)** — sends any unmatched fields to `claude-sonnet-4-6` with a structured prompt. Claude returns a JSON mapping of field identifiers to profile keys or direct option values (e.g. "Yes", "No").
-4. **Claude AI (vision)** — takes a screenshot of the visible tab and sends it alongside unmatched fields to Claude's vision model for visual context.
+3. **AI text fill** — sends any unmatched fields to the configured AI provider along with your profile and page context (title, headings, nearby text). The AI returns a JSON mapping: profile keys for standard fields, or generated first-person answers for open-ended questions (e.g. "What will you build?").
+4. **AI vision fill** — takes a screenshot of the visible tab and sends it alongside unmatched fields and page context for visual context. Always uses Anthropic Claude (Llama has no vision support).
+5. **Custom dropdown fill** — detects non-native dropdown components (`role="combobox"`, `aria-haspopup="listbox"`, and "Select an option" placeholders), opens each to discover options, asks AI to pick the best one, then clicks it.
 
-Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independent — a failure in Pass 3 does not prevent Pass 4 from running.
+Passes 3–5 only run if an API key is configured. Each pass is independent.
 
 ---
 
 ## Features
 
 - Fills standard personal, address, and professional fields without any AI call
-- React-compatible field filling using native input setters and `InputEvent` so React's synthetic event system fires correctly
-- Optional floating button that appears on pages containing forms, with SPA navigation support via `MutationObserver`
-- Keyboard-accessible popup with ARIA roles, `aria-selected` tab state, and `focus-visible` gold outline ring
-- All API calls include a 30-second timeout via `AbortController`
-- API key is stored locally in `chrome.storage.local` and never transmitted in extension messages
+- Handles **custom dropdown components** (not just native `<select>`) — common on Luma, Eventbrite, and modern form builders
+- AI generates context-aware answers for open-ended fields and always picks the best available dropdown option
+- **Multi-provider**: Anthropic Claude Sonnet or Replicate Llama 3.3 70B — switch in Settings
+- API key **Test** button for both providers
+- Multi-profile support: create, switch, rename (inline — no dialogs), and delete named profiles
+- **Quick Signup** tab: paste an event URL and Fillr opens it, fills the form, and submits automatically
+- Site blacklist: specify domains where Fillr should never run
+- Site assignments: pin a specific profile to a domain
+- JSON import/export for profile backup (API keys excluded from export)
+- Keyboard shortcut `Cmd+Shift+F` / `Ctrl+Shift+F` triggers fill without opening the popup
+- Extension badge shows the fill count for 4 seconds after each fill
+- Auto-saves profile fields 800ms after typing stops — no manual save required
+- `Cmd/Ctrl+S` saves the active tab (Details or Settings)
+- React-compatible field filling using native input setters and `InputEvent`
+- Optional floating button on pages with forms, with SPA navigation support via `MutationObserver`
+- Keyboard-accessible popup with ARIA roles and `focus-visible` outline ring
+- Undo: toast with "Undo" button after each fill reverts all changed fields
+- All API calls include timeouts via `AbortController`
 
 ---
 
@@ -34,8 +48,8 @@ Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independ
 2. Open `chrome://extensions` in Chrome.
 3. Enable **Developer mode** (top right toggle).
 4. Click **Load unpacked** and select the extension folder.
-5. Open the Fillr popup, go to **Settings**, paste your [Anthropic API key](https://console.anthropic.com/), and click **Save**.
-6. Fill in your details on the **My Details** tab and click **Save Details**.
+5. Open the Fillr popup, go to **Settings**, choose your AI provider, paste your API key, and click **Save**.
+6. Fill in your details on the **Details** tab — fields save automatically as you type.
 
 ---
 
@@ -52,7 +66,9 @@ Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independ
 | Company | |
 | Years Experience | |
 | LinkedIn / GitHub / Website | URLs |
+| Twitter / Instagram | Social handles (e.g. `@jane`) |
 | Bio / Summary | Long-form text for cover and summary fields |
+| Additional Context | Extra info for AI — startup description, goals, background |
 
 ---
 
@@ -60,11 +76,10 @@ Passes 3 and 4 only run if an Anthropic API key is stored. Each pass is independ
 
 | Permission | Reason |
 |---|---|
-| `storage` | Stores profile data and API key locally |
+| `storage` | Stores profile data and API keys locally |
 | `activeTab` | Injects content script and captures screenshot on the active tab only |
+| `scripting` | Dynamic content script injection on keyboard shortcut |
 | `host_permissions: <all_urls>` | Required to inject the content script on arbitrary pages |
-
-The `scripting` and `tabs` permissions are not requested. `activeTab` is sufficient for both content script injection and `captureVisibleTab`.
 
 ---
 
@@ -73,11 +88,11 @@ The `scripting` and `tabs` permissions are not requested. `activeTab` is suffici
 ```
 fillr/
   manifest.json       Extension manifest (MV3)
-  background.js       Service worker — handles Claude API calls
-  content.js          Injected into pages — field detection and filling
+  background.js       Service worker — AI API calls, badge, keyboard shortcut
+  content.js          Injected into pages — field detection, filling, custom dropdowns
   popup.html          Extension popup UI
-  popup.js            Popup logic — profile storage, tab switching, fill trigger
-  styles.css          Popup styles (dark theme, gold accent)
+  popup.js            Popup logic — profiles, settings, quick signup, fill trigger
+  styles.css          Popup styles (dark theme, gold accent, light mode)
   icons/              Extension icons at 16, 48, and 128px
 ```
 
@@ -87,8 +102,7 @@ fillr/
 
 No build step required. Edit source files directly and click **Reload** on `chrome://extensions` after changes.
 
-To regenerate the icons (requires Python 3, no external dependencies):
-
+To regenerate icons (requires Python 3):
 ```
 python3 make_icons.py
 ```

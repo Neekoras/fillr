@@ -39,9 +39,31 @@
       box-shadow: 0 4px 24px rgba(201,169,110,0.3), 0 2px 8px rgba(0,0,0,0.4);
       transform: translateY(-1px);
     }
+    #__autofill-float-btn__:focus-visible {
+      outline: 2px solid #C9A96E;
+      outline-offset: 3px;
+    }
+    @media (prefers-color-scheme: light) {
+      #__autofill-float-btn__ {
+        background: #FFFFFF;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      }
+      #__autofill-float-btn__:hover {
+        box-shadow: 0 4px 24px rgba(201,169,110,0.4);
+      }
+    }
   `;
   (document.head || document.documentElement).appendChild(style);
 })();
+
+// ── Field selector constant ───────────────────────────────────────────────────
+const FIELD_SELECTOR = [
+  'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file])',
+  'textarea',
+  'select',
+  '[contenteditable="true"]',
+  '[contenteditable=""]',
+].join(', ');
 
 // ── Keyword map (Pass 1) ──────────────────────────────────────────────────────
 const KEYWORD_MAP = {
@@ -122,7 +144,7 @@ const KEYWORD_MAP = {
   'workplace': 'company',
 };
 
-// Pre-compiled fuzzy patterns for Pass 2 (avoids rebuilding ~60 RegExp objects per field)
+// Pre-compiled fuzzy patterns for Pass 2
 const FUZZY_PATTERNS = Object.entries(KEYWORD_MAP).map(([kw, profileKey]) => ({
   re: new RegExp('(?<![a-zA-Z0-9_])' + kw.replace(/_/g, '[\\s_-]*') + '(?![a-zA-Z0-9_])', 'i'),
   profileKey
@@ -150,6 +172,7 @@ function getProfile(data) {
     yearsExp: data.yearsExp || '',
     jobTitle: data.jobTitle || '',
     company: data.company || '',
+    context: data.context || '',
   };
 }
 
@@ -165,26 +188,36 @@ function stripInvisible(str) {
   return (str || '').replace(/[\u200B\u200C\u200D\uFEFF\u00AD\u00A0]/g, '').trim();
 }
 
+// ── Label text cache (prevents calling getLabelText 3x per field) ─────────────
+const labelCache = new WeakMap();
+
 // ── Collect visible, fillable fields ─────────────────────────────────────────
 function collectFields() {
-  const selectors = [
-    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]):not([type=checkbox]):not([type=radio])',
-    'textarea',
-    'select',
-    '[contenteditable="true"]',
-    '[contenteditable=""]',
-  ].join(', ');
+  const main = Array.from(document.querySelectorAll(FIELD_SELECTOR));
 
-  return Array.from(document.querySelectorAll(selectors)).filter(el => {
+  // Basic one-level shadow DOM support
+  const shadow = [];
+  document.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) {
+      Array.from(el.shadowRoot.querySelectorAll(FIELD_SELECTOR)).forEach(f => shadow.push(f));
+    }
+  });
+
+  return [...main, ...shadow].filter(el => {
     if (el.disabled || el.readOnly) return false;
-    // Check if already filled — strip invisible chars before deciding
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    if (el.type === 'checkbox') return !el.checked;
+    if (el.type === 'radio') {
+      if (!el.name) return false;
+      const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+      if (group.some(r => r.checked)) return false;
+      return group[0] === el;
+    }
     const currentVal = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
       ? el.value
       : el.textContent;
     if (stripInvisible(currentVal) !== '') return false;
-    // Basic visibility check
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
     return true;
   });
 }
@@ -193,58 +226,70 @@ function collectFields() {
 const INPUT_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
 
 function getLabelText(el) {
+  if (labelCache.has(el)) return labelCache.get(el);
+
+  let result = '';
+
   // 1. Explicit <label for="id">
   if (el.id) {
     const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-    if (label) return label.textContent.trim();
+    if (label) { result = label.textContent.trim(); }
   }
-  // 2. Parent <label>
-  const parentLabel = el.closest('label');
-  if (parentLabel) return parentLabel.textContent.trim();
-  // 3. aria-label
-  const ariaLabel = el.getAttribute('aria-label');
-  if (ariaLabel) return ariaLabel.trim();
-  // 4. aria-labelledby
-  const labelledBy = el.getAttribute('aria-labelledby');
-  if (labelledBy) {
-    const text = labelledBy.trim().split(/\s+/)
-      .map(id => { const t = document.getElementById(id); return t ? t.textContent.trim() : ''; })
-      .filter(Boolean).join(' ');
-    if (text) return text;
+  if (!result) {
+    // 2. Parent <label>
+    const parentLabel = el.closest('label');
+    if (parentLabel) result = parentLabel.textContent.trim();
   }
-  // 5. title attribute
-  if (el.title) return el.title.trim();
-  // 6. data-label / data-field-label attributes (used by some form builders)
-  for (const attr of ['data-label', 'data-field-label', 'data-name', 'data-question']) {
-    const v = el.getAttribute(attr);
-    if (v) return v.trim();
+  if (!result) {
+    // 3. aria-label
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) result = ariaLabel.trim();
   }
-  // 7. Walk up ancestors (max 3 levels), collect nearby text excluding other inputs
-  let node = el.parentElement;
-  for (let depth = 0; depth < 3 && node && node !== document.body; depth++) {
-    // Early stop: if this ancestor contains multiple form fields, we've crossed a section boundary
-    const inputCount = node.querySelectorAll('input:not([type=hidden]), select, textarea').length;
-    if (inputCount > 1) break;
-
-    // Check all previous siblings at this level
-    let sib = node.previousElementSibling;
-    while (sib) {
-      if (!INPUT_TAGS.has(sib.tagName)) {
-        const text = sib.textContent.trim();
-        if (text && text.length < 300) return text;
-      }
-      sib = sib.previousElementSibling;
+  if (!result) {
+    // 4. aria-labelledby
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const text = labelledBy.trim().split(/\s+/)
+        .map(id => { const t = document.getElementById(id); return t ? t.textContent.trim() : ''; })
+        .filter(Boolean).join(' ');
+      if (text) result = text;
     }
-    // Check direct text nodes of this ancestor (excluding child inputs)
-    const childText = Array.from(node.childNodes)
-      .filter(n => n.nodeType === Node.TEXT_NODE)
-      .map(n => n.textContent.trim())
-      .filter(Boolean)
-      .join(' ');
-    if (childText && childText.length < 300) return childText;
-    node = node.parentElement;
   }
-  return '';
+  if (!result && el.title) result = el.title.trim();
+  if (!result) {
+    // 6. data-label / data-field-label attributes
+    for (const attr of ['data-label', 'data-field-label', 'data-name', 'data-question']) {
+      const v = el.getAttribute(attr);
+      if (v) { result = v.trim(); break; }
+    }
+  }
+  if (!result) {
+    // 7. Walk up ancestors (max 3 levels)
+    let node = el.parentElement;
+    for (let depth = 0; depth < 3 && node && node !== document.body; depth++) {
+      const inputCount = node.querySelectorAll('input:not([type=hidden]), select, textarea').length;
+      if (inputCount > 1) break;
+      let sib = node.previousElementSibling;
+      while (sib) {
+        if (!INPUT_TAGS.has(sib.tagName)) {
+          const text = sib.textContent.trim();
+          if (text && text.length < 300) { result = text; break; }
+        }
+        sib = sib.previousElementSibling;
+      }
+      if (result) break;
+      const childText = Array.from(node.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE)
+        .map(n => n.textContent.trim())
+        .filter(Boolean)
+        .join(' ');
+      if (childText && childText.length < 300) { result = childText; break; }
+      node = node.parentElement;
+    }
+  }
+
+  labelCache.set(el, result);
+  return result;
 }
 
 // ── Normalize string for matching ─────────────────────────────────────────────
@@ -268,7 +313,7 @@ function exactMatch(el) {
 // ── Pass 2: Fuzzy word-boundary match ────────────────────────────────────────
 function fuzzyMatch(el) {
   const text = [
-    getLabelText(el),
+    getLabelText(el), // reads from cache — no extra DOM traversal
     el.placeholder || '',
     el.name || '',
     el.id || '',
@@ -279,54 +324,71 @@ function fuzzyMatch(el) {
   ].join(' ').toLowerCase();
 
   for (const { re, profileKey } of FUZZY_PATTERNS) {
-    if (re.test(text)) {
-      return profileKey;
-    }
+    if (re.test(text)) return profileKey;
   }
   return null;
 }
 
 // ── Fill a single field ───────────────────────────────────────────────────────
 function fillField(el, value) {
-  if (!value && value !== 0) return false;
+  if (value === null || value === undefined) return false;
 
   const strVal = String(value);
   const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '';
 
+  if (el.type === 'checkbox') {
+    const truthy = /^(yes|true|1|checked|on)$/i.test(strVal.trim());
+    el.checked = truthy;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.classList.add('autofill-highlight');
+    setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
+    return true;
+  }
+
+  if (el.type === 'radio') {
+    if (!el.name) return false;
+    const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+    // Empty string means undo — uncheck all
+    if (!strVal.trim()) {
+      group.forEach(r => { r.checked = false; r.dispatchEvent(new Event('change', { bubbles: true })); });
+      return true;
+    }
+    const lower = strVal.toLowerCase().trim();
+    const match = group.find(r => r.value.toLowerCase() === lower)
+      || group.find(r => getLabelText(r).toLowerCase() === lower)
+      || group.find(r => r.value.toLowerCase().startsWith(lower));
+    if (!match) return false;
+    match.checked = true;
+    match.dispatchEvent(new Event('change', { bubbles: true }));
+    match.classList.add('autofill-highlight');
+    setTimeout(() => match.classList.remove('autofill-highlight'), 1500);
+    return true;
+  }
+
   if (isContentEditable) {
     el.focus();
-    // Select all existing content and replace
     document.execCommand('selectAll', false, null);
     document.execCommand('insertText', false, strVal);
-    // Fallback if execCommand not available
-    if (stripInvisible(el.textContent) !== strVal) {
-      el.textContent = strVal;
-    }
+    if (stripInvisible(el.textContent) !== strVal) el.textContent = strVal;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.type === 'date' && strVal) {
-    // Date inputs require YYYY-MM-DD format
     const d = new Date(strVal);
-    if (!isNaN(d)) el.value = d.toISOString().split('T')[0];
-    else el.value = strVal; // pass through if already formatted
+    if (!isNaN(d.getTime())) el.value = d.toISOString().split('T')[0];
+    else el.value = strVal;
     el.dispatchEvent(new InputEvent('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.tagName === 'SELECT') {
     const opts = Array.from(el.options).filter(o => o.value !== '');
     const lower = strVal.toLowerCase();
-    // Tightened match order: exact → starts-with-option → option-starts-with-value
     const match = opts.find(o => o.value.toLowerCase() === lower || o.text.toLowerCase() === lower)
       || opts.find(o => o.text.toLowerCase().startsWith(lower))
       || opts.find(o => lower.startsWith(o.text.toLowerCase()));
-    if (match) {
-      el.value = match.value;
-    } else {
-      return false;
-    }
+    if (match) { el.value = match.value; }
+    else return false;
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else {
-    // React-compatible: use native setter + InputEvent so React's synthetic event system fires
     const doc = el.ownerDocument;
     const view = doc.defaultView;
     const proto = el.tagName === 'TEXTAREA'
@@ -340,10 +402,164 @@ function fillField(el, value) {
 
   el.classList.add('autofill-highlight');
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
-
   return true;
 }
 
+
+// ── Custom dropdown (non-native select) support ────────────────────────────────
+
+function findCustomDropdowns() {
+  const results = [];
+  const seen = new Set();
+  // Already-handled native selects — skip their wrappers
+  const nativeSelects = new Set(document.querySelectorAll('select'));
+
+  const candidates = [
+    ...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="true"]'),
+    ...document.querySelectorAll('button, div, span')
+  ];
+
+  for (const el of candidates) {
+    if (seen.has(el)) continue;
+    if (el.tagName === 'INPUT' || el.tagName === 'SELECT') continue;
+    if (el.closest('select')) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+    // Must either have aria role OR look like a "Select an option" placeholder trigger
+    const hasRole = el.getAttribute('role') === 'combobox' ||
+      el.getAttribute('aria-haspopup') === 'listbox' ||
+      el.getAttribute('aria-haspopup') === 'true';
+    const looksLikePlaceholder = /^(select (an?|one|one or more) ?option|choose( an?)?|pick an?)/i.test(el.textContent.trim());
+
+    if (!hasRole && !looksLikePlaceholder) continue;
+    seen.add(el);
+    results.push(el);
+  }
+  return results;
+}
+
+function getLabelForCustomDropdown(el) {
+  if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+  const labelledBy = el.getAttribute('aria-labelledby');
+  if (labelledBy) {
+    const text = labelledBy.trim().split(/\s+/).map(id => {
+      const t = document.getElementById(id); return t ? t.textContent.trim() : '';
+    }).filter(Boolean).join(' ');
+    if (text) return text;
+  }
+  // Walk up looking for a label sibling or parent label text
+  let node = el.parentElement;
+  for (let depth = 0; depth < 5 && node && node !== document.body; depth++) {
+    let sib = node.previousElementSibling;
+    while (sib) {
+      if (!INPUT_TAGS.has(sib.tagName)) {
+        const t = sib.textContent.trim();
+        if (t && t.length < 200) return t;
+      }
+      sib = sib.previousElementSibling;
+    }
+    const label = node.querySelector('label');
+    if (label && !el.contains(label)) {
+      const t = label.textContent.trim();
+      if (t && t.length < 200) return t;
+    }
+    node = node.parentElement;
+  }
+  return el.getAttribute('placeholder') || '';
+}
+
+function findVisibleDropdownOptions() {
+  // role="option" is the most reliable signal
+  const byRole = Array.from(document.querySelectorAll('[role="option"], [role="listbox"] li, [role="listbox"] [role="option"]'))
+    .filter(el => {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    });
+  if (byRole.length) return byRole;
+
+  // Fallback: absolute/fixed positioned list that appeared after a click
+  const containers = Array.from(document.querySelectorAll('ul, ol, [class*="dropdown"], [class*="options"], [class*="listbox"], [class*="menu"]'))
+    .filter(el => {
+      const s = window.getComputedStyle(el);
+      return (s.position === 'absolute' || s.position === 'fixed') && s.display !== 'none' && s.visibility !== 'hidden';
+    })
+    .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+
+  for (const container of containers) {
+    const items = Array.from(container.querySelectorAll('li, [class*="option"], [class*="item"]'))
+      .filter(el => {
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden';
+      });
+    if (items.length) return items;
+  }
+  return [];
+}
+
+async function peekDropdownOptions(el) {
+  // Check aria-owns/aria-controls for pre-existing hidden listbox
+  const ownedId = el.getAttribute('aria-owns') || el.getAttribute('aria-controls');
+  if (ownedId) {
+    const listbox = document.getElementById(ownedId);
+    if (listbox) {
+      const opts = Array.from(listbox.querySelectorAll('[role="option"], li'))
+        .map(o => o.textContent.trim()).filter(t => t && !/^select|^choose/i.test(t));
+      if (opts.length) return opts;
+    }
+  }
+  // Check parent for pre-rendered hidden options
+  const parentOpts = Array.from((el.parentElement || el).querySelectorAll('[role="option"]'))
+    .map(o => o.textContent.trim()).filter(Boolean);
+  if (parentOpts.length) return parentOpts;
+
+  // Open → collect → close
+  el.click();
+  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 400));
+
+  const optionEls = findVisibleDropdownOptions();
+  const opts = optionEls.map(o => o.textContent.trim()).filter(t => t && !/^select|^choose/i.test(t));
+
+  // Close
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  document.body.click();
+  await new Promise(r => setTimeout(r, 200));
+  return opts;
+}
+
+async function fillCustomDropdown(el, value) {
+  const lower = value.toLowerCase().trim();
+  el.click();
+  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 400));
+
+  const optionEls = findVisibleDropdownOptions();
+  if (!optionEls.length) { document.body.click(); return false; }
+
+  const match =
+    optionEls.find(o => o.textContent.trim().toLowerCase() === lower) ||
+    optionEls.find(o => o.textContent.trim().toLowerCase().startsWith(lower)) ||
+    optionEls.find(o => lower.startsWith(o.textContent.trim().toLowerCase())) ||
+    optionEls.find(o => o.textContent.trim().toLowerCase().includes(lower));
+
+  if (!match) {
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.body.click();
+    await new Promise(r => setTimeout(r, 100));
+    return false;
+  }
+
+  match.scrollIntoView({ block: 'nearest' });
+  match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  match.click();
+  match.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 150));
+
+  el.classList.add('autofill-highlight');
+  setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
+  return true;
+}
 // ── Collect page context for Claude ──────────────────────────────────────────
 function getPageContext() {
   const title = document.title || '';
@@ -352,19 +568,18 @@ function getPageContext() {
     .slice(0, 8)
     .map(h => h.textContent.trim())
     .filter(Boolean);
-  // Grab readable text near the form (event description, instructions, etc.)
-  const formEl = document.querySelector('form');
+  const formEl = document.querySelector('form') || document.querySelector('[role="form"]');
   let nearbyText = '';
   if (formEl) {
     const container = formEl.closest('section, main, article') || formEl.parentElement;
     if (container) {
-      // Collect text nodes, skip script/style, cap at 800 chars
       const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
       const chunks = [];
+      let len = 0;
       let node;
-      while ((node = walker.nextNode()) && chunks.join(' ').length < 800) {
+      while ((node = walker.nextNode()) && len < 800) {
         const t = node.textContent.trim();
-        if (t.length > 20) chunks.push(t);
+        if (t.length > 20) { chunks.push(t); len += t.length + 1; }
       }
       nearbyText = chunks.join(' ').slice(0, 800);
     }
@@ -378,7 +593,7 @@ function fieldDescriptor(el) {
     id: el.id || el.dataset.__fillrIdx || '',
     name: el.name || '',
     placeholder: el.placeholder || '',
-    label: getLabelText(el),
+    label: getLabelText(el), // reads from cache
     type: el.tagName === 'SELECT' ? 'select' : (el.type || el.tagName.toLowerCase()),
   };
   if (el.tagName === 'SELECT') {
@@ -387,47 +602,56 @@ function fieldDescriptor(el) {
       .map(o => o.text.trim())
       .slice(0, 30);
   }
+  if (el.type === 'radio' && el.name) {
+    const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+    desc.options = Array.from(group).map(r => getLabelText(r) || r.value);
+    desc.type = 'radio-group';
+  }
   return desc;
 }
 
 // ── Apply a Claude mapping value to a field ───────────────────────────────────
-// Claude may return:
-//   - a profile key ("company", "firstName") → look up in profile
-//   - a direct option text for selects ("Yes", "Founder")
-//   - a generated string for open-ended questions ("I'm building a ...")
 function applyClaudeValue(el, claudeValue, profile) {
   if (!claudeValue) return false;
   if (el.tagName === 'SELECT') {
-    // Try the raw Claude value as a direct option (e.g. "Yes", "No", "Founder")
     if (fillField(el, claudeValue)) return true;
   }
-  // Try as a profile key first
   const profileVal = profileValue(profile, claudeValue);
   if (profileVal) return fillField(el, profileVal);
-  // Fall back to using the Claude value as a literal generated string
   return fillField(el, claudeValue);
 }
 
+// ── Undo stack ────────────────────────────────────────────────────────────────
+let undoStack = [];
+
+// ── Concurrent fill guard ─────────────────────────────────────────────────────
+let isFilling = false;
+
 // ── Main autofill function ────────────────────────────────────────────────────
 async function autofill() {
+  if (isFilling) return { filled: 0 };
+  isFilling = true;
+  try {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites'], resolve)
+    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments'], resolve)
   );
 
-  // Site blacklist check
-  const blockedSites = storageData.blockedSites || [];
-  if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) {
-    return { filled: 0 };
+  const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
+  const hostname = location.hostname.toLowerCase();
+  if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) {
+    return { filled: 0, blocked: true };
   }
 
-  // Multi-profile: read from active profile
   let profileData;
   const profiles = storageData.profiles;
   if (profiles && profiles.length > 0) {
-    const activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
+    const siteAssignments = storageData.siteAssignments || {};
+    let activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
+    if (siteAssignments[hostname] !== undefined) {
+      activeIdx = Math.min(siteAssignments[hostname], profiles.length - 1);
+    }
     profileData = profiles[activeIdx];
   } else {
-    // Fallback: legacy flat storage (migration path)
     profileData = storageData;
   }
 
@@ -437,33 +661,57 @@ async function autofill() {
 
   const fields = collectFields();
   let filledCount = 0;
+  let firstFilledEl = null;
   const unmatched = [];
 
+  // Snapshot original values for undo (before any fills)
+  const originalValues = new Map();
   for (const el of fields) {
-    let profileKey = exactMatch(el) || fuzzyMatch(el);
+    if (el.type === 'checkbox') {
+      originalValues.set(el, el.checked ? 'checked' : 'unchecked');
+    } else if (el.type === 'radio' && el.name) {
+      const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      originalValues.set(el, Array.from(group).find(r => r.checked)?.value || '');
+    } else {
+      originalValues.set(el, el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        ? el.value : el.textContent);
+    }
+  }
+
+  // Pre-populate label cache for all fields in one pass
+  fields.forEach(el => getLabelText(el));
+
+  for (const el of fields) {
+    const profileKey = exactMatch(el) || fuzzyMatch(el);
     if (profileKey) {
       const val = profileValue(profile, profileKey);
-      if (val && fillField(el, val)) filledCount++;
+      if (val && fillField(el, val)) {
+        if (!firstFilledEl) firstFilledEl = el;
+        filledCount++;
+      }
     } else {
       unmatched.push(el);
     }
   }
 
-  // Pass 3 + 4: Claude API for unmatched fields
   if (unmatched.length > 0) {
-    // Assign positional index to fields with no id AND no name so Claude can key them
     unmatched.forEach((el, i) => {
       if (!el.id && !el.name) el.dataset.__fillrIdx = String(i);
     });
 
     let stillUnmatched = [...unmatched];
 
+    // Build once, reuse in both Pass 3 and Pass 4
+    const profileWithFullName = {
+      ...profile,
+      fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
+    };
+
     if (apiKey) {
       try {
-        const profileWithFullName = {
-          ...profile,
-          fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-        };
+        // Notify popup that Pass 3 is starting
+        chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-text' }).catch(() => {});
+
         const descriptors = unmatched.map(fieldDescriptor);
         const response = await chrome.runtime.sendMessage({
           action: 'claudeFill',
@@ -477,8 +725,12 @@ async function autofill() {
           for (const el of unmatched) {
             const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = response.mapping[key];
-            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) filledCount++;
-            else stillUnmatched.push(el);
+            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) {
+              if (!firstFilledEl) firstFilledEl = el;
+              filledCount++;
+            } else {
+              stillUnmatched.push(el);
+            }
           }
         } else if (response && response.error) {
           console.warn('[Autofill] Pass 3 error:', response.error);
@@ -491,11 +743,10 @@ async function autofill() {
 
     if (stillUnmatched.length > 0 && apiKey) {
       try {
-        const profileWithFullName = {
-          ...profile,
-          fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-        };
-        const descriptors = stillUnmatched.map(fieldDescriptor);
+        // Notify popup that Pass 4 is starting
+        chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-vision' }).catch(() => {});
+
+        const descriptors = stillUnmatched.map(fieldDescriptor).slice(0, 20);
         const visionResponse = await chrome.runtime.sendMessage({
           action: 'claudeVisionFill',
           fields: descriptors,
@@ -506,7 +757,10 @@ async function autofill() {
           for (const el of stillUnmatched) {
             const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = visionResponse.mapping[key];
-            if (claudeVal) applyClaudeValue(el, claudeVal, profile) && filledCount++;
+            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) {
+              if (!firstFilledEl) firstFilledEl = el;
+              filledCount++;
+            }
           }
         } else if (visionResponse && visionResponse.error) {
           apiError = apiError || visionResponse.error;
@@ -516,11 +770,149 @@ async function autofill() {
       }
     }
 
-    // Cleanup positional index attributes
     unmatched.forEach(el => { delete el.dataset.__fillrIdx; });
   }
 
-  return { filled: filledCount, apiError };
+
+  // ── Pass 5: Custom dropdown fill ──────────────────────────────────────────
+  try {
+    const customDropdowns = findCustomDropdowns();
+    if (customDropdowns.length > 0) {
+      const customDescriptors = [];
+      for (let i = 0; i < customDropdowns.length; i++) {
+        const cEl = customDropdowns[i];
+        const label = getLabelForCustomDropdown(cEl);
+        const options = await peekDropdownOptions(cEl);
+        const idx = `__custom_${i}`;
+        cEl.dataset.__fillrCustomIdx = idx;
+        customDescriptors.push({ id: idx, name: '', placeholder: '', label, type: 'select', options: options.slice(0, 30) });
+      }
+      if (customDescriptors.length > 0) {
+        chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-text' }).catch(() => {});
+        const customResponse = await chrome.runtime.sendMessage({
+          action: 'claudeFill',
+          fields: customDescriptors,
+          profile: profileWithFullName,
+          pageContext: getPageContext(),
+        });
+        if (customResponse && customResponse.mapping) {
+          for (let i = 0; i < customDropdowns.length; i++) {
+            const cEl = customDropdowns[i];
+            const idx = `__custom_${i}`;
+            const val = customResponse.mapping[idx];
+            if (val && await fillCustomDropdown(cEl, val)) {
+              filledCount++;
+              if (!firstFilledEl) firstFilledEl = cEl;
+            }
+            delete cEl.dataset.__fillrCustomIdx;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[Autofill] Pass 5 (custom dropdowns) failed:', e);
+  }
+
+  // Build undo stack — only fields whose value actually changed
+  undoStack = [];
+  for (const [el, original] of originalValues) {
+    let current;
+    if (el.type === 'checkbox') {
+      current = el.checked ? 'checked' : 'unchecked';
+    } else if (el.type === 'radio' && el.name) {
+      const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      current = Array.from(group).find(r => r.checked)?.value || '';
+    } else {
+      current = el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
+        ? el.value : el.textContent;
+    }
+    if (current !== original) undoStack.push({ el, original });
+  }
+
+  // Scroll once to the first filled field (not per-field — prevents jarring multi-scroll)
+  if (firstFilledEl) {
+    firstFilledEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  return { filled: filledCount, apiError, hasUndo: undoStack.length > 0 };
+  } finally {
+    isFilling = false;
+  }
+}
+
+// ── Quick signup helpers ──────────────────────────────────────────────────────
+function isVisibleEl(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && !el.disabled;
+}
+
+function findSubmitButton() {
+  // Prefer explicit submit buttons
+  const explicit = Array.from(
+    document.querySelectorAll('button[type=submit]:not(:disabled), input[type=submit]:not(:disabled)')
+  ).find(isVisibleEl);
+  if (explicit) return explicit;
+
+  // Fall back to keyword-matched buttons
+  const keywords = /\b(register|sign\s*up|rsvp|submit|join|attend|confirm|continue|next)\b/i;
+  return Array.from(document.querySelectorAll('button:not(:disabled), [role=button]'))
+    .find(b => isVisibleEl(b) && keywords.test(b.textContent.trim())) || null;
+}
+
+// Pre-flight CAPTCHA detection
+function hasCaptcha() {
+  return !!(
+    document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]') ||
+    document.querySelector('.cf-turnstile') ||
+    document.querySelector('[data-sitekey]')
+  );
+}
+
+function detectSignupSuccess() {
+  const text = document.body.innerText;
+  return /you.?re (registered|going|in|all set)|registration confirmed|rsvp confirmed|see you there|you.?re registered/i.test(text);
+}
+
+// Multi-step fill+submit loop (handles Luma's email→name two-step flow).
+// Returns { submitted, confirmed, filled } or { captcha: true }.
+async function fillAndSubmit() {
+  if (isFilling) return { error: 'Already filling' };
+  if (hasCaptcha()) return { captcha: true };
+
+  let totalFilled = 0;
+  let submitted = false;
+
+  for (let step = 0; step < 3; step++) {
+    if (detectSignupSuccess()) { submitted = true; break; }
+
+    const result = await autofill();
+    totalFilled += result.filled;
+
+    // No new fields on step > 0 means the form isn't advancing
+    if (result.filled === 0 && step > 0) break;
+
+    // Wait for React to process fills
+    await new Promise(r => setTimeout(r, 600));
+
+    const btn = findSubmitButton();
+    if (!btn) break;
+
+    const urlBefore = location.href;
+    btn.click();
+    submitted = true;
+
+    // Wait for the page to react
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Secondary success signal: URL change post-submit
+    const urlChanged = location.href !== urlBefore;
+    if (urlChanged || detectSignupSuccess()) {
+      return { submitted: true, confirmed: true, filled: totalFilled };
+    }
+  }
+
+  return { submitted, confirmed: detectSignupSuccess(), filled: totalFilled };
 }
 
 // ── Floating button ───────────────────────────────────────────────────────────
@@ -532,35 +924,36 @@ function createFloatingButton() {
   if (document.getElementById('__autofill-float-btn__')) return;
   if (!hasFormElements()) return;
 
-  // Check blacklist before showing the button
   chrome.storage.local.get('blockedSites', ({ blockedSites = [] }) => {
-    if (blockedSites.some(d => location.hostname === d || location.hostname.endsWith('.' + d))) return;
+    const hostname = location.hostname.toLowerCase();
+    if (blockedSites.map(s => s.toLowerCase()).some(d => hostname === d || hostname.endsWith('.' + d))) return;
 
     const btn = document.createElement('button');
     btn.id = '__autofill-float-btn__';
     btn.innerHTML = 'Autofill';
     btn.title = 'Autofill this page';
 
-    let isFilling = false;
     btn.addEventListener('click', async () => {
-      if (isFilling) return;
-      isFilling = true;
+      if (btn.dataset.filling) return;
+      btn.dataset.filling = '1';
       btn.disabled = true;
       btn.textContent = 'Filling...';
       try {
         const result = await autofill();
         const count = result.filled;
-        btn.innerHTML = count > 0 ? `${count} filled` : 'Autofill';
         if (count > 0) {
-          chrome.runtime.sendMessage({ action: 'setBadge', count });
+          btn.innerHTML = `${count} filled`;
+          chrome.runtime.sendMessage({ action: 'setBadge', count }).catch(() => {});
+          setTimeout(() => { if (btn) btn.innerHTML = 'Autofill'; }, 2000);
+        } else {
+          btn.innerHTML = 'Autofill';
         }
       } catch (e) {
         btn.innerHTML = 'Autofill';
       } finally {
-        isFilling = false;
+        delete btn.dataset.filling;
         btn.disabled = false;
       }
-      setTimeout(() => { btn.innerHTML = 'Autofill'; }, 2000);
     });
     document.body.appendChild(btn);
   });
@@ -571,7 +964,6 @@ function removeFloatingButton() {
   if (btn) btn.remove();
 }
 
-// Initialize floating button based on stored setting
 chrome.storage.local.get('floatingBtn', ({ floatingBtn }) => {
   if (floatingBtn) createFloatingButton();
 });
@@ -592,24 +984,48 @@ const spaObserver = new MutationObserver(() => {
 });
 spaObserver.observe(document.body, { childList: true, subtree: true });
 
+// Disconnect observer on page unload to prevent memory leak
+window.addEventListener('beforeunload', () => {
+  spaObserver.disconnect();
+  clearTimeout(_spaDebounce);
+});
+
 // ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'fill') {
     autofill().then(result => {
       if (result.filled > 0) {
-        chrome.runtime.sendMessage({ action: 'setBadge', count: result.filled });
+        chrome.runtime.sendMessage({ action: 'setBadge', count: result.filled }).catch(() => {});
       }
       sendResponse(result);
     }).catch(() => sendResponse({ filled: 0 }));
-    return true; // async
+    return true;
+  }
+
+  if (message.action === 'undoFill') {
+    let restored = 0;
+    for (const { el, original } of undoStack) {
+      if (fillField(el, original)) restored++;
+    }
+    undoStack = [];
+    sendResponse({ restored });
+    return true;
   }
 
   if (message.action === 'toggleFloatingBtn') {
-    if (message.enabled) {
-      createFloatingButton();
-    } else {
-      removeFloatingButton();
-    }
+    if (message.enabled) createFloatingButton();
+    else removeFloatingButton();
     sendResponse({ ok: true });
   }
+
+  if (message.action === 'ping') {
+    sendResponse({ ok: true });
+  }
+
+  if (message.action === 'fillAndSubmit') {
+    fillAndSubmit().then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
 });
+
+

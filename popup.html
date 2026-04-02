@@ -14,7 +14,7 @@
 
   <div class="header">
     <h1>Fillr</h1>
-    <button class="btn-hover-fill" id="fillPageTop" aria-label="Fill Out">
+    <button class="btn-hover-fill" id="fillPageTop" aria-label="Fill this page">
       <span class="btn-hover-label">Fill Out</span>
       <span class="btn-hover-reveal" aria-hidden="true">
         <span>Fill Out</span>
@@ -27,17 +27,32 @@
   <!-- Profile selector -->
   <div class="profile-bar">
     <select id="profileSelect" aria-label="Active profile"></select>
-    <button type="button" class="btn-profile-action" id="newProfile" title="New profile">+</button>
-    <button type="button" class="btn-profile-action btn-profile-delete" id="deleteProfile" title="Delete profile">×</button>
+    <!-- Inline rename input — hidden until rename/new is clicked -->
+    <input type="text" id="profileNameInput" class="profile-name-input" placeholder="Profile name" style="display:none" maxlength="40" />
+    <button type="button" class="btn-profile-action" id="newProfile" title="New profile" aria-label="New profile">+</button>
+    <button type="button" class="btn-profile-action" id="renameProfile" title="Rename profile" aria-label="Rename profile">✎</button>
+    <button type="button" class="btn-profile-action" id="confirmProfileName" title="Save name" aria-label="Save name" style="display:none">✓</button>
+    <button type="button" class="btn-profile-action" id="cancelProfileName" title="Cancel" aria-label="Cancel" style="display:none">×</button>
+    <button type="button" class="btn-profile-action btn-profile-delete" id="deleteProfile" title="Delete profile" aria-label="Delete profile">×</button>
   </div>
 
   <div class="tabs" role="tablist" aria-orientation="horizontal">
-    <button class="tab-btn active" data-tab="details" role="tab" id="tab-btn-details" aria-selected="true" aria-controls="tab-details">My Details</button>
+    <button class="tab-btn active" data-tab="details" role="tab" id="tab-btn-details" aria-selected="true" aria-controls="tab-details">
+      Details
+      <span id="saveIndicator" class="save-indicator" aria-hidden="true"></span>
+    </button>
     <button class="tab-btn" data-tab="settings" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Settings</button>
+    <button class="tab-btn" data-tab="signup" role="tab" id="tab-btn-signup" aria-selected="false" aria-controls="tab-signup">Signup</button>
   </div>
 
-  <!-- Tab 1: My Details -->
+  <!-- Tab 1: Details -->
   <div class="tab-content active" id="tab-details" role="tabpanel" aria-labelledby="tab-btn-details">
+
+    <div id="onboardingBanner" class="onboarding-banner" style="display:none">
+      <p>Welcome to Fillr! Fill in your details below — they save automatically as you type.</p>
+      <p class="onboarding-hint">Use <kbd>Cmd+Shift+F</kbd> on any page to autofill instantly.</p>
+      <button type="button" id="dismissOnboarding" class="onboarding-dismiss" aria-label="Dismiss">×</button>
+    </div>
 
     <p class="section-title">Personal</p>
     <div class="form-grid">
@@ -127,6 +142,14 @@
       </div>
     </div>
 
+    <p class="section-title">Context for AI</p>
+    <div class="form-grid">
+      <div class="form-group full-width">
+        <label for="context">Additional Context</label>
+        <textarea id="context" placeholder="Tell Claude about your startup, goals, background — anything that helps it write better answers for open-ended questions." style="min-height:80px"></textarea>
+      </div>
+    </div>
+
     <div class="btn-row">
       <button class="btn btn-primary btn-full" id="saveDetails">Save Details</button>
     </div>
@@ -136,9 +159,18 @@
   <!-- Tab 2: Settings -->
   <div class="tab-content" id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings">
 
-    <p class="section-title">Claude AI</p>
+    <p class="section-title">AI Provider</p>
     <div class="settings-group">
-      <div class="api-key-row">
+      <div class="form-group">
+        <label for="aiProvider">Provider</label>
+        <select id="aiProvider" style="-webkit-appearance:auto;appearance:auto;background:var(--surface-2);border:1px solid var(--border-input);border-radius:8px;padding:6px 10px;font-family:var(--font-sans);font-size:13px;color:var(--text-primary);width:100%;outline:none;">
+          <option value="anthropic">Anthropic — Claude Sonnet</option>
+          <option value="replicate">Replicate — Llama 3.3 70B</option>
+        </select>
+      </div>
+
+      <!-- Anthropic key row -->
+      <div class="api-key-row" id="anthropicKeyRow">
         <div class="form-group">
           <label for="apiKey">Anthropic API Key</label>
           <div class="input-with-icon">
@@ -150,19 +182,36 @@
           </div>
         </div>
         <button class="btn btn-primary" id="saveApiKey">Save</button>
+        <button class="btn btn-secondary" id="testApiKey">Test</button>
       </div>
 
-      <label class="setting-row" for="floatingBtn">
-        <div>
-          <div class="setting-label">Floating Button</div>
-          <div class="setting-desc">Show fill button on pages with forms</div>
+      <!-- Replicate key row -->
+      <div class="api-key-row" id="replicateKeyRow" style="display:none">
+        <div class="form-group">
+          <label for="replicateApiKey">Replicate API Key</label>
+          <div class="input-with-icon">
+            <input type="password" id="replicateApiKey" placeholder="r8_..." autocomplete="off" />
+            <button type="button" id="toggleReplicateKey" class="btn-icon" aria-label="Show Replicate API key">
+              <svg id="repEyeIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg id="repEyeOffIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
         </div>
-        <span class="toggle">
-          <input type="checkbox" id="floatingBtn" />
-          <span class="toggle-slider"></span>
-        </span>
-      </label>
+        <button class="btn btn-primary" id="saveReplicateKey">Save</button>
+        <button class="btn btn-secondary" id="testReplicateKey">Test</button>
+      </div>
     </div>
+
+    <label class="setting-row" for="floatingBtn" style="margin-top:12px">
+      <div>
+        <div class="setting-label">Floating Button</div>
+        <div class="setting-desc">Show fill button on pages with forms</div>
+      </div>
+      <span class="toggle" role="presentation">
+        <input type="checkbox" id="floatingBtn" />
+        <span class="toggle-slider"></span>
+      </span>
+    </label>
 
     <p class="section-title">Blocked Sites</p>
     <div class="settings-group">
@@ -176,6 +225,19 @@
       </div>
     </div>
 
+    <p class="section-title">Site Assignments</p>
+    <div class="settings-group">
+      <div class="site-assign-row" id="siteAssignCurrentRow">
+        <span class="site-assign-domain" id="siteAssignDomain">—</span>
+        <select id="siteAssignProfile" class="site-assign-select" aria-label="Profile for this site">
+          <option value="">Auto</option>
+        </select>
+        <button class="btn btn-sm btn-primary" id="siteAssignSave">Assign</button>
+      </div>
+      <div id="siteAssignList"></div>
+      <p class="hint">Automatically use a profile when visiting a site.</p>
+    </div>
+
     <p class="section-title">Data</p>
     <div class="settings-group">
       <div class="btn-row-inline">
@@ -183,12 +245,30 @@
         <button class="btn btn-sm btn-secondary" id="importData">Import JSON</button>
         <input type="file" id="importFile" accept=".json" style="display:none" />
       </div>
+      <p class="hint">Backup includes profiles and blocked sites. API keys are not exported.</p>
     </div>
 
-    <div class="fill-btn-wrap">
-      <button class="btn-fill-page" id="fillPage">Fill This Page</button>
-    </div>
+  </div>
 
+  <!-- Tab 3: Quick Signup -->
+  <div class="tab-content" id="tab-signup" role="tabpanel" aria-labelledby="tab-btn-signup">
+    <p class="section-title" style="margin-top:0">Quick Signup</p>
+    <p class="hint" style="margin-bottom:16px">Paste an event link and Fillr signs you up automatically — no tab switching needed.</p>
+    <div class="form-group full-width">
+      <label for="signupUrl">Event URL</label>
+      <input type="url" id="signupUrl" placeholder="https://lu.ma/…" autocomplete="off" />
+    </div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="btn btn-primary btn-full" id="signupBtn">Sign Up</button>
+    </div>
+    <div id="signupStatus" class="signup-status" style="display:none"></div>
+    <div id="signupHistorySection" style="display:none">
+      <div class="signup-history-header">
+        <p class="section-title">History</p>
+        <button type="button" id="clearHistory" class="btn-link">Clear</button>
+      </div>
+      <div id="signupHistory" class="signup-history"></div>
+    </div>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
