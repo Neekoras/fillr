@@ -257,23 +257,7 @@ document.getElementById('profileNameInput').addEventListener('keydown', e => {
   if (e.key === 'Escape') { e.preventDefault(); hideProfileNameInput(); }
 });
 
-document.getElementById('renameProfile').addEventListener('click', () => {
-  const current = profiles[activeProfile].name || `Profile ${activeProfile + 1}`;
-  const raw = window.prompt('Rename profile:', current);
-  if (raw === null) return;
-  const name = raw.trim();
-  if (!name) {
-    showToast('Name cannot be empty', true);
-    return;
-  }
-  if (profiles.some((p, i) => i !== activeProfile && p.name.toLowerCase() === name.toLowerCase())) {
-    showToast('A profile with that name already exists', true);
-    return;
-  }
-  profiles[activeProfile].name = name;
-  populateProfileSelect();
-  saveProfiles(() => showToast('Profile renamed'));
-});
+
 
 document.getElementById('deleteProfile').addEventListener('click', () => {
   if (profiles.length <= 1) {
