@@ -338,7 +338,11 @@ function fillField(el, value) {
 
   if (el.type === 'checkbox') {
     const truthy = /^(yes|true|1|checked|on)$/i.test(strVal.trim());
-    el.checked = truthy;
+    // Use native setter so React's synthetic event system sees the change
+    const nativeCheckedSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
+    if (nativeCheckedSetter) nativeCheckedSetter.call(el, truthy); else el.checked = truthy;
+    // React maps onChange to click; dispatch both for framework compatibility
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.classList.add('autofill-highlight');
     setTimeout(() => el.classList.remove('autofill-highlight'), 1500);

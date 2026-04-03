@@ -74,19 +74,22 @@ function setCache(fields, mapping, hostname) {
   fillCache.set(fingerprint(fields, hostname), { mapping, ts: Date.now() });
 }
 
-// ── Replicate API call (Llama 3.3 70B Instruct) ────────────────────────────
+// ── Replicate API call (Llama 3 70B Instruct) ─────────────────────────────
+// Uses meta/meta-llama-3-70b-instruct — the official Meta model on Replicate.
+// Prefer: wait=25 holds the connection synchronously; if the model is cold-starting
+// the response arrives with status:"processing" and we fall through to polling.
 async function callReplicateAPI(apiKey, messages) {
   const prompt = messages[0]?.content || '';
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
+  const timer = setTimeout(() => controller.abort(), 28000);
   let response;
   try {
-    response = await fetch('https://api.replicate.com/v1/models/meta/llama-3.3-70b-instruct/predictions', {
+    response = await fetch('https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'Prefer': 'respond-sync'
+        'Prefer': 'wait=25'
       },
       body: JSON.stringify({
         input: {
@@ -117,8 +120,23 @@ async function callReplicateAPI(apiKey, messages) {
   try { data = await response.json(); }
   catch { return { error: 'Failed to parse Replicate response' }; }
 
+  // Cold-start polling: if the model didn't finish within the wait window, poll until done
+  if (data.status === 'processing' && data.urls?.get) {
+    const pollUrl = data.urls.get;
+    const deadline = Date.now() + 90000; // 90s total budget
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const pr = await fetch(pollUrl, { headers: { 'Authorization': `Bearer ${apiKey}` } });
+        if (!pr.ok) break;
+        data = await pr.json();
+        if (data.status === 'succeeded' || data.status === 'failed') break;
+      } catch { break; }
+    }
+  }
+
   if (data.status !== 'succeeded') {
-    return { error: `Replicate: ${data.error || data.status}` };
+    return { error: `Replicate: ${data.error || data.status || 'timed out'}` };
   }
 
   const rawText = (Array.isArray(data.output) ? data.output.join('') : (data.output || '')).trim();
@@ -346,12 +364,12 @@ async function testReplicateKey(apiKey) {
   const timer = setTimeout(() => controller.abort(), 15000);
   let response;
   try {
-    response = await fetch('https://api.replicate.com/v1/models/meta/llama-3.3-70b-instruct/predictions', {
+    response = await fetch('https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'Prefer': 'respond-sync'
+        'Prefer': 'wait=5'
       },
       body: JSON.stringify({ input: { prompt: 'Reply with: {}', system_prompt: 'Output only valid JSON.', max_new_tokens: 8, temperature: 0.1 } }),
       signal: controller.signal
@@ -363,7 +381,14 @@ async function testReplicateKey(apiKey) {
   }
   clearTimeout(timer);
   if (response.status === 401) return { error: 'Invalid API key' };
-  if (response.status === 422 || response.ok) return { ok: true };
+  if (!response.ok) {
+    let errorText;
+    try { const j = await response.json(); errorText = j.detail || response.statusText; }
+    catch { errorText = response.statusText; }
+    return { error: `Replicate error ${response.status}: ${errorText}` };
+  }
+  // Key is valid even if prediction hasn't completed yet (status: "processing")
+  return { ok: true };
   let errorText;
   try { const j = await response.json(); errorText = j.detail || response.statusText; }
   catch { errorText = response.statusText; }
