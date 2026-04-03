@@ -294,20 +294,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// ── Keyboard shortcut ──────────────────────────────────────────────────────
-chrome.commands.onCommand.addListener(command => {
-  if (command !== 'trigger-fill') return;
-  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-    if (!tabs[0]) return;
-    chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' }, () => {
-      if (!chrome.runtime.lastError) return;
-      chrome.scripting.executeScript({ target: { tabId: tabs[0].id }, files: ['content.js'] }, () => {
-        if (chrome.runtime.lastError) return;
-        chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' });
-      });
-    });
-  });
-});
+
 
 // ── Anthropic API key test ─────────────────────────────────────────────────
 async function testApiKey(apiKey) {
