@@ -14,7 +14,7 @@
 
   <div class="header">
     <h1>Fillr</h1>
-    <button class="btn-hover-fill" id="fillPageTop" aria-label="Fill this page">
+    <button class="btn-hover-fill" id="fillPageTop" aria-label="Fill this page" title="Autofill the current page (Cmd+Shift+F)">
       <span class="btn-hover-label">Fill Out</span>
       <span class="btn-hover-reveal" aria-hidden="true">
         <span>Fill Out</span>
@@ -29,11 +29,11 @@
     <select id="profileSelect" aria-label="Active profile"></select>
     <!-- Inline rename input — hidden until rename/new is clicked -->
     <input type="text" id="profileNameInput" class="profile-name-input" placeholder="Profile name" style="display:none" maxlength="40" />
-    <button type="button" class="btn-profile-action" id="newProfile" title="New profile" aria-label="New profile">+</button>
-    <button type="button" class="btn-profile-action" id="renameProfile" title="Rename profile" aria-label="Rename profile">✎</button>
-    <button type="button" class="btn-profile-action" id="confirmProfileName" title="Save name" aria-label="Save name" style="display:none">✓</button>
-    <button type="button" class="btn-profile-action" id="cancelProfileName" title="Cancel" aria-label="Cancel" style="display:none">×</button>
-    <button type="button" class="btn-profile-action btn-profile-delete" id="deleteProfile" title="Delete profile" aria-label="Delete profile">×</button>
+    <button type="button" class="btn-profile-action" id="newProfile" title="Create a new profile" aria-label="New profile">+</button>
+    <button type="button" class="btn-profile-action" id="renameProfile" title="Rename this profile" aria-label="Rename profile">✎</button>
+    <button type="button" class="btn-profile-action" id="confirmProfileName" title="Save profile name" aria-label="Save name" style="display:none">✓</button>
+    <button type="button" class="btn-profile-action" id="cancelProfileName" title="Cancel rename" aria-label="Cancel" style="display:none">×</button>
+    <button type="button" class="btn-profile-action btn-profile-delete" id="deleteProfile" title="Delete this profile" aria-label="Delete profile">×</button>
   </div>
 
   <div class="tabs" role="tablist" aria-orientation="horizontal">
@@ -151,7 +151,7 @@
     </div>
 
     <div class="btn-row">
-      <button class="btn btn-primary btn-full" id="saveDetails">Save Details</button>
+      <button class="btn btn-primary btn-full" id="saveDetails" title="Save your profile details">Save Details</button>
     </div>
 
   </div>
@@ -175,14 +175,14 @@
           <label for="apiKey">Anthropic API Key</label>
           <div class="input-with-icon">
             <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" />
-            <button type="button" id="toggleApiKey" class="btn-icon" aria-label="Show API key">
+            <button type="button" id="toggleApiKey" class="btn-icon" aria-label="Show API key" title="Show / hide API key">
               <svg id="eyeIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
               <svg id="eyeOffIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
             </button>
           </div>
         </div>
-        <button class="btn btn-primary" id="saveApiKey">Save</button>
-        <button class="btn btn-secondary" id="testApiKey">Test</button>
+        <button class="btn btn-primary" id="saveApiKey" title="Save your Anthropic API key">Save</button>
+        <button class="btn btn-secondary" id="testApiKey" title="Check if your Anthropic key is valid">Test</button>
       </div>
 
       <!-- Replicate key row -->
@@ -191,14 +191,14 @@
           <label for="replicateApiKey">Replicate API Key</label>
           <div class="input-with-icon">
             <input type="password" id="replicateApiKey" placeholder="r8_..." autocomplete="off" />
-            <button type="button" id="toggleReplicateKey" class="btn-icon" aria-label="Show Replicate API key">
+            <button type="button" id="toggleReplicateKey" class="btn-icon" aria-label="Show Replicate API key" title="Show / hide Replicate key">
               <svg id="repEyeIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
               <svg id="repEyeOffIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
             </button>
           </div>
         </div>
-        <button class="btn btn-primary" id="saveReplicateKey">Save</button>
-        <button class="btn btn-secondary" id="testReplicateKey">Test</button>
+        <button class="btn btn-primary" id="saveReplicateKey" title="Save your Replicate API key">Save</button>
+        <button class="btn btn-secondary" id="testReplicateKey" title="Check if your Replicate key is valid">Test</button>
       </div>
     </div>
 
@@ -220,8 +220,8 @@
         <textarea id="blockedSites" placeholder="example.com&#10;another.com" style="min-height:60px"></textarea>
       </div>
       <div class="btn-row-inline">
-        <button class="btn btn-sm btn-secondary" id="addCurrentSite">Add Current Site</button>
-        <button class="btn btn-sm btn-primary" id="saveBlockedSites">Save</button>
+        <button class="btn btn-sm btn-secondary" id="addCurrentSite" title="Block the site you're currently on">Add Current Site</button>
+        <button class="btn btn-sm btn-primary" id="saveBlockedSites" title="Save the blocked sites list">Save</button>
       </div>
     </div>
 
@@ -232,7 +232,7 @@
         <select id="siteAssignProfile" class="site-assign-select" aria-label="Profile for this site">
           <option value="">Auto</option>
         </select>
-        <button class="btn btn-sm btn-primary" id="siteAssignSave">Assign</button>
+        <button class="btn btn-sm btn-primary" id="siteAssignSave" title="Always use this profile on the current site">Assign</button>
       </div>
       <div id="siteAssignList"></div>
       <p class="hint">Automatically use a profile when visiting a site.</p>
@@ -241,8 +241,8 @@
     <p class="section-title">Data</p>
     <div class="settings-group">
       <div class="btn-row-inline">
-        <button class="btn btn-sm btn-secondary" id="exportData">Export JSON</button>
-        <button class="btn btn-sm btn-secondary" id="importData">Import JSON</button>
+        <button class="btn btn-sm btn-secondary" id="exportData" title="Download all profiles as a JSON backup">Export JSON</button>
+        <button class="btn btn-sm btn-secondary" id="importData" title="Restore profiles from a JSON backup">Import JSON</button>
         <input type="file" id="importFile" accept=".json" style="display:none" />
       </div>
       <p class="hint">Backup includes profiles and blocked sites. API keys are not exported.</p>
@@ -259,13 +259,13 @@
       <input type="url" id="signupUrl" placeholder="https://lu.ma/…" autocomplete="off" />
     </div>
     <div class="btn-row" style="margin-top:16px">
-      <button class="btn btn-primary btn-full" id="signupBtn">Sign Up</button>
+      <button class="btn btn-primary btn-full" id="signupBtn" title="Open the URL and auto-fill + submit the signup form">Sign Up</button>
     </div>
     <div id="signupStatus" class="signup-status" style="display:none"></div>
     <div id="signupHistorySection" style="display:none">
       <div class="signup-history-header">
         <p class="section-title">History</p>
-        <button type="button" id="clearHistory" class="btn-link">Clear</button>
+        <button type="button" id="clearHistory" class="btn-link" title="Clear signup history">Clear</button>
       </div>
       <div id="signupHistory" class="signup-history"></div>
     </div>
