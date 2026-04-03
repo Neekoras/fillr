@@ -374,10 +374,12 @@ function fillField(el, value) {
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.type === 'date' && strVal) {
     const d = new Date(strVal);
-    if (!isNaN(d.getTime())) el.value = d.toISOString().split('T')[0];
-    else el.value = strVal;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (!isNaN(d.getTime())) {
+      el.value = d.toISOString().split('T')[0];
+      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    // If date is unparseable, skip silently rather than setting an invalid value
   } else if (el.tagName === 'SELECT') {
     const opts = Array.from(el.options).filter(o => o.value !== '');
     const lower = strVal.toLowerCase();
@@ -504,7 +506,7 @@ async function peekDropdownOptions(el) {
     const listbox = document.getElementById(ownedId);
     if (listbox) {
       const opts = Array.from(listbox.querySelectorAll('[role="option"], li'))
-        .map(o => o.textContent.trim()).filter(t => t && !/^select|^choose/i.test(t));
+        .map(o => o.textContent.trim()).filter(t => t && !/^(?:select|choose)\b/i.test(t));
       if (opts.length) return opts;
     }
   }
@@ -519,7 +521,7 @@ async function peekDropdownOptions(el) {
   await new Promise(r => setTimeout(r, 400));
 
   const optionEls = findVisibleDropdownOptions();
-  const opts = optionEls.map(o => o.textContent.trim()).filter(t => t && !/^select|^choose/i.test(t));
+  const opts = optionEls.map(o => o.textContent.trim()).filter(t => t && !/^(?:select|choose)\b/i.test(t));
 
   // Close
   document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));

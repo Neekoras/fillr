@@ -453,7 +453,9 @@ document.getElementById('importFile').addEventListener('change', e => {
       activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
       const blockedSites = data.blockedSites || [];
       siteAssignments = (data.siteAssignments && typeof data.siteAssignments === 'object' && !Array.isArray(data.siteAssignments)) ? data.siteAssignments : {};
-      signupHistory = Array.isArray(data.signupHistory) ? data.signupHistory : [];
+      signupHistory = Array.isArray(data.signupHistory)
+        ? data.signupHistory.filter(e => e && typeof e === 'object' && e.url && typeof e.timestamp === 'number' && e.status)
+        : [];
       chrome.storage.local.set({ profiles, activeProfile, blockedSites, siteAssignments, signupHistory }, () => {
         populateProfileSelect();
         loadProfileIntoForm(profiles[activeProfile]);

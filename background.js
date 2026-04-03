@@ -34,12 +34,24 @@ function buildPageContextBlock(pageContext) {
   return parts.length ? `\nPage context (use this to understand what the form is about):\n${parts.join('\n')}\n` : '';
 }
 
-// Robustly extract the first JSON object from the response text.
+// Robustly extract the first JSON object from the response text using brace counting.
+// lastIndexOf('}') breaks when Claude adds trailing prose or nested objects.
 function extractJSON(rawText) {
   const start = rawText.indexOf('{');
-  const end = rawText.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) throw new Error('No JSON object found in response');
-  return JSON.parse(rawText.slice(start, end + 1));
+  if (start === -1) throw new Error('No JSON object found in response');
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < rawText.length; i++) {
+    const c = rawText[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\' && inString) { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') depth++;
+    if (c === '}') { depth--; if (depth === 0) return JSON.parse(rawText.slice(start, i + 1)); }
+  }
+  throw new Error('No complete JSON object found in response');
 }
 
 // ── Form fingerprint cache (skip Claude for repeat fills) ─────────────────
@@ -47,7 +59,7 @@ const fillCache = new Map();
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 function fingerprint(fields, hostname) {
-  return (hostname || '') + ':' + fields.map(f => `${f.id}|${f.name}|${f.type}`).sort().join(',');
+  return (hostname || '') + ':' + fields.map(f => `${encodeURIComponent(f.id || '')}|${encodeURIComponent(f.name || '')}|${encodeURIComponent(f.type || '')}`).sort().join(',');
 }
 
 function getCached(fields, hostname) {
@@ -417,7 +429,9 @@ async function handleClaudeVisionFill({ fields, profile, pageContext, windowId }
   } catch (err) {
     return { error: `Screenshot failed: ${err.message}` };
   }
-  const base64Image = screenshotDataUrl.replace(/^data:image\/jpeg;base64,/, '');
+  const urlMatch = screenshotDataUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+  if (!urlMatch) return { error: 'Invalid screenshot data URL' };
+  const [, screenshotMediaType, base64Image] = urlMatch;
   const { profileDesc, availableKeys, contextBlock } = buildProfileBlock(profile);
   const fieldDesc = buildFieldList(fields);
   const pageCtxBlock = buildPageContextBlock(pageContext);
@@ -450,7 +464,7 @@ Example: {"field_abc": "company", "field_xyz": "jobTitle", "is_founder": "Yes", 
   return await callAnthropicAPI(apiKey, [{
     role: 'user',
     content: [
-      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Image } },
+      { type: 'image', source: { type: 'base64', media_type: screenshotMediaType, data: base64Image } },
       { type: 'text', text: prompt }
     ]
   }]);
