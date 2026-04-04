@@ -852,6 +852,100 @@ input:focus-visible + .toggle-slider {
   border-radius: 3px;
 }
 
+/* ── Test button spinner (item 30) ─────────────────────────────────────────── */
+.btn-testing { position: relative; padding-right: 28px; }
+.btn-testing::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  opacity: 0.7;
+}
+@keyframes spin { to { transform: translateY(-50%) rotate(360deg); } }
+.btn-valid { color: #6FCF97; border-color: #6FCF97; }
+.btn-invalid { color: var(--error); border-color: var(--error); }
+
+/* ── Profile completeness indicator (item 20) ──────────────────────────────── */
+.completeness-indicator {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: color var(--transition);
+  margin-left: auto;
+}
+
+/* ── Fill stats bar chart (item 19) ────────────────────────────────────────── */
+.stat-bar-wrap { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.stat-bar-row { display: flex; align-items: center; gap: 8px; font-size: 11px; font-family: var(--font-mono); }
+.stat-bar { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.stat-bar-fill { height: 100%; background: var(--gold); border-radius: 2px; transition: width 0.3s ease; }
+
+/* ── Site-add confirmation (item 31) ───────────────────────────────────────── */
+.site-add-confirm {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #4A4A4A;
+  margin-left: 8px;
+  animation: fadeOut 2s forwards;
+}
+@keyframes fadeOut { 0%,70% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ── Toast count badge (item 28) ───────────────────────────────────────────── */
+.toast-count {
+  display: inline-block;
+  background: var(--gold);
+  color: var(--bg-on-gold);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* ── Section title row (for completeness indicator alignment) ──────────────── */
+.section-title-row {
+  display: flex;
+  align-items: center;
+  margin: 24px 0 12px;
+}
+.section-title-row:first-child { margin-top: 0; }
+.section-title-row .section-title { margin: 0; }
+
+/* ── Per-field override row (item 18) ──────────────────────────────────────── */
+.override-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--gold-glow);
+  border: 1px solid var(--gold);
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.override-row input {
+  flex: 1;
+  font-size: 11px;
+  padding: 4px 8px;
+  min-height: unset;
+}
+.override-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--gold);
+  margin-left: 4px;
+  cursor: help;
+}
+
 /* ── Light mode ────────────────────────────────────────────────────────────── */
 @media (prefers-color-scheme: light) {
   :root {

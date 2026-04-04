@@ -2,8 +2,14 @@
 
 /**
  * Background service worker.
- * Handles Claude API calls, badge management, and keyboard shortcut.
+ * Handles Claude API calls, badge management, keyboard shortcut, and context menu.
  */
+
+// ── Provider capabilities ──────────────────────────────────────────────────
+const PROVIDER_CAPS = {
+  anthropic: { supportsVision: true },
+  replicate: { supportsVision: false }
+};
 
 // ── Shared prompt-building helpers ────────────────────────────────────────
 function buildProfileBlock(profile) {
@@ -35,7 +41,6 @@ function buildPageContextBlock(pageContext) {
 }
 
 // Robustly extract the first JSON object from the response text using brace counting.
-// lastIndexOf('}') breaks when Claude adds trailing prose or nested objects.
 function extractJSON(rawText) {
   const start = rawText.indexOf('{');
   if (start === -1) throw new Error('No JSON object found in response');
@@ -74,17 +79,22 @@ function setCache(fields, mapping, hostname) {
   fillCache.set(fingerprint(fields, hostname), { mapping, ts: Date.now() });
 }
 
+// ── Port tracking for Replicate polling cancellation ──────────────────────
+let _activeFillerPort = null;
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name !== 'fillr-fill') return;
+  _activeFillerPort = port;
+  port.onDisconnect.addListener(() => { _activeFillerPort = null; });
+});
+
 // ── Replicate API call (Llama 3 70B Instruct) ─────────────────────────────
-// Uses meta/meta-llama-3-70b-instruct — the official Meta model on Replicate.
-// Prefer: wait=25 holds the connection synchronously; if the model is cold-starting
-// the response arrives with status:"processing" and we fall through to polling.
 async function callReplicateAPI(apiKey, messages) {
   const prompt = messages[0]?.content || '';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 28000);
   let response;
   try {
-    response = await fetch('https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions', {
+    response = await fetch('https://api.replicate.com/v1/models/meta/meta-llama-3.1-70b-instruct/predictions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -124,8 +134,27 @@ async function callReplicateAPI(apiKey, messages) {
   if (data.status === 'processing' && data.urls?.get) {
     const pollUrl = data.urls.get;
     const deadline = Date.now() + 90000; // 90s total budget
+    const startTime = Date.now();
+    let lastProgressSend = Date.now();
+
     while (Date.now() < deadline) {
+      // Check port disconnect — cancel if popup closed
+      if (_activeFillerPort === null) {
+        return { error: 'Cancelled — popup was closed.' };
+      }
+
       await new Promise(r => setTimeout(r, 2000));
+
+      // Send progress feedback every ~10s
+      const now = Date.now();
+      if (now - lastProgressSend >= 10000) {
+        lastProgressSend = now;
+        const elapsed = Math.floor((now - startTime) / 1000);
+        const progressMsg = { action: 'signupProgress', stage: 'thinking', elapsed };
+        if (elapsed >= 45) progressMsg.coldStart = true;
+        chrome.runtime.sendMessage(progressMsg).catch(() => {});
+      }
+
       try {
         const pr = await fetch(pollUrl, { headers: { 'Authorization': `Bearer ${apiKey}` } });
         if (!pr.ok) break;
@@ -180,9 +209,11 @@ async function callAnthropicAPI(apiKey, messages) {
     }
     clearTimeout(timer);
 
-    if (response.status === 429 || response.status >= 500) {
-      const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10) * 1000;
-      if (retryAfter > 0 && attempt + 1 < delays.length) delays[attempt + 1] = retryAfter;
+    // Retry on 429, 529 (Anthropic overloaded), and 5xx errors
+    if (response.status === 429 || response.status === 529 || response.status >= 500) {
+      const retryAfterRaw = parseInt(response.headers.get('retry-after') || '0', 10) * 1000;
+      const wait = retryAfterRaw > 0 ? retryAfterRaw : 2000;
+      if (attempt + 1 < delays.length) delays[attempt + 1] = wait;
       lastError = `API error ${response.status}`;
       continue;
     }
@@ -239,13 +270,19 @@ function waitForContentScript(tabId) {
   });
 }
 
+// Private / local IP ranges — block for security
+const PRIVATE_HOST = /^(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+
 async function handleQuickSignup(url) {
   try {
     const parsed = new URL(url);
     if (!/^https?:$/.test(parsed.protocol)) return { error: 'Only http/https URLs are supported' };
+    if (url.length > 2048) return { error: 'URL too long (max 2048 characters).' };
+    if (PRIVATE_HOST.test(parsed.hostname)) return { error: 'Local/private URLs are not supported.' };
   } catch { return { error: 'Invalid URL' }; }
 
   let tabId;
+  let keepTabOpen = false;
   try {
     let tab;
     try {
@@ -261,10 +298,10 @@ async function handleQuickSignup(url) {
 
     chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'filling' }).catch(() => {});
 
-    const result = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Signup timed out — try again.')), 30000);
+    // 30-second timeout via Promise.race — resolves with timedOut flag instead of rejecting
+    const timeout = new Promise(r => setTimeout(() => r({ timedOut: true }), 30000));
+    const fillMsg = new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tabId, { action: 'fillAndSubmit' }, response => {
-        clearTimeout(timer);
         if (chrome.runtime.lastError) {
           const msg = chrome.runtime.lastError.message || '';
           reject(new Error(/no tab|closed|removed/i.test(msg) ? 'Signup cancelled.' : msg));
@@ -274,11 +311,27 @@ async function handleQuickSignup(url) {
       });
     });
 
+    const result = await Promise.race([fillMsg, timeout]);
+    if (result?.timedOut) {
+      return { error: 'Signup timed out — form may have been submitted. Check your email.', warn: true };
+    }
+
+    // Required fields still empty — keep tab open so user can fill manually
+    if (result?.requiredUnfilled?.length > 0) {
+      keepTabOpen = true;
+      chrome.tabs.update(tabId, { active: true }).catch(() => {});
+      return result;
+    }
+
+    // Confirmed or submitted — tab can close
     return result || { error: 'No response from page' };
   } catch (err) {
     return { error: err.message || 'Signup failed' };
   } finally {
-    if (tabId !== undefined) chrome.tabs.remove(tabId).catch(() => {});
+    if (tabId !== undefined && !keepTabOpen) {
+      try { await chrome.tabs.remove(tabId); }
+      catch (e) { if (!/no tab with id/i.test(e.message)) throw e; }
+    }
   }
 }
 
@@ -291,18 +344,34 @@ function setBadge(count) {
   badgeTimer = setTimeout(() => chrome.action.setBadgeText({ text: '' }), 4000);
 }
 
+// ── Analytics save ─────────────────────────────────────────────────────────
+async function saveFillAnalytics({ hostname, totalFields, filledFields, passBreakdown, apiCallsMade, durationMs }) {
+  const { fillAnalytics = [] } = await chrome.storage.local.get('fillAnalytics');
+  fillAnalytics.unshift({ ts: Date.now(), hostname, totalFields, filledFields, passBreakdown, apiCallsMade, durationMs });
+  if (fillAnalytics.length > 100) fillAnalytics.length = 100;
+  chrome.storage.local.set({ fillAnalytics });
+}
+
 // ── Message listener ───────────────────────────────────────────────────────
+const ALLOWED_ACTIONS = new Set([
+  'claudeFill', 'claudeVisionFill', 'setBadge', 'testApiKey', 'testReplicateKey',
+  'quickSignup', 'fillProgress', 'signupProgress', 'saveFillAnalytics', 'generateEssayAnswer'
+]);
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!ALLOWED_ACTIONS.has(message.action)) return;
   if (sender.id !== chrome.runtime.id) return;
 
   if (message.action === 'claudeFill') {
     if (!sender.tab) { sendResponse({ error: 'Unauthorized' }); return; }
+    if (!/^https?:\/\//.test(sender.tab.url || '')) { sendResponse({ error: 'Unauthorized' }); return; }
     const tabHostname = (() => { try { return new URL(sender.tab.url).hostname; } catch { return ''; } })();
     handleClaudeFill(message, tabHostname).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
     return true;
   }
   if (message.action === 'claudeVisionFill') {
     if (!sender.tab) { sendResponse({ error: 'Unauthorized' }); return; }
+    if (!/^https?:\/\//.test(sender.tab.url || '')) { sendResponse({ error: 'Unauthorized' }); return; }
     handleClaudeVisionFill({ ...message, windowId: sender.tab?.windowId }).then(sendResponse).catch(err => sendResponse({ error: err.message || 'Unknown error' }));
     return true;
   }
@@ -322,9 +391,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleQuickSignup(message.url).then(sendResponse).catch(err => sendResponse({ error: err.message }));
     return true;
   }
+  if (message.action === 'saveFillAnalytics') {
+    saveFillAnalytics(message.data).catch(() => {});
+    sendResponse({ ok: true });
+  }
+  if (message.action === 'generateEssayAnswer') {
+    if (!sender.tab) { sendResponse({}); return; }
+    handleGenerateEssayAnswer(message).then(sendResponse).catch(() => sendResponse({}));
+    return true;
+  }
 });
 
+// ── Keyboard shortcut handler (item 17) ────────────────────────────────────
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== 'trigger-fill') return;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  const hostname = (() => { try { return new URL(tab.url).hostname.toLowerCase(); } catch { return ''; } })();
+  const { blockedSites = [] } = await chrome.storage.local.get('blockedSites');
+  if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) return;
+  chrome.tabs.sendMessage(tab.id, { action: 'fill' }, result => {
+    if (chrome.runtime.lastError) return;
+    if (result?.filled > 0) {
+      chrome.tabs.sendMessage(tab.id, { action: 'showPageToast', msg: `Fillr: ${result.filled} field${result.filled !== 1 ? 's' : ''} filled` });
+      setBadge(result.filled);
+    }
+  });
+});
 
+// ── Context menu (item 21) ─────────────────────────────────────────────────
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: 'fillr-fill',
+    title: 'Fill this form with Fillr',
+    contexts: ['page', 'editable']
+  });
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId !== 'fillr-fill' || !tab?.id) return;
+  const hostname = (() => { try { return new URL(tab.url).hostname.toLowerCase(); } catch { return ''; } })();
+  const { blockedSites = [] } = await chrome.storage.local.get('blockedSites');
+  if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) return;
+  chrome.tabs.sendMessage(tab.id, { action: 'fill' }, result => {
+    if (chrome.runtime.lastError) return;
+    if (result?.filled > 0) setBadge(result.filled);
+  });
+});
 
 // ── Anthropic API key test ─────────────────────────────────────────────────
 async function testApiKey(apiKey) {
@@ -364,7 +477,7 @@ async function testReplicateKey(apiKey) {
   const timer = setTimeout(() => controller.abort(), 15000);
   let response;
   try {
-    response = await fetch('https://api.replicate.com/v1/models/meta/meta-llama-3-70b-instruct/predictions', {
+    response = await fetch('https://api.replicate.com/v1/models/meta/meta-llama-3.1-70b-instruct/predictions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -389,10 +502,65 @@ async function testReplicateKey(apiKey) {
   }
   // Key is valid even if prediction hasn't completed yet (status: "processing")
   return { ok: true };
-  let errorText;
-  try { const j = await response.json(); errorText = j.detail || response.statusText; }
-  catch { errorText = response.statusText; }
-  return { error: `Replicate error ${response.status}: ${errorText}` };
+}
+
+// ── Essay answer generator (called from fillEmptyRequiredWithNA) ────────────
+// Generates a compelling, contextual plain-text answer for an open-ended field.
+async function handleGenerateEssayAnswer({ label, options, pageContext }) {
+  const { apiKey, replicateApiKey, aiProvider, profiles, activeProfile } =
+    await chrome.storage.local.get(['apiKey', 'replicateApiKey', 'aiProvider', 'profiles', 'activeProfile']);
+  const provider = aiProvider || 'anthropic';
+  // Only Anthropic supports plain-text responses reliably here
+  const key = provider === 'replicate' ? replicateApiKey : apiKey;
+  if (!key) return {};
+
+  const profile = (profiles || {})[activeProfile || 'default'] || {};
+  const { profileDesc, contextBlock } = buildProfileBlock(profile);
+  const { title = '', url = '', headings = [] } = pageContext || {};
+
+  const isSelect = options && options.length > 0;
+  const optionsBlock = isSelect
+    ? `\nThe field is a dropdown. You MUST reply with EXACTLY one of these options: ${options.map(o => JSON.stringify(o)).join(', ')}.`
+    : '';
+
+  const prompt = `You are helping someone sign up for an event or program. Write a response to the following form field on their behalf.
+
+Field label: "${label}"${optionsBlock}
+
+Event/page context:
+- Title: ${title}
+- URL: ${url}
+${headings.length ? `- Headings: ${headings.join(' | ')}` : ''}
+
+User profile:
+${profileDesc}
+${contextBlock}
+Instructions:
+- For open-ended questions ("What have you built?", "What do you plan to build?", "Why do you want to attend?", "Tell us about yourself"): write 2–4 compelling, specific, first-person sentences tailored to the event context and user profile. Sound like a real, ambitious person — be concrete and exciting.
+- For "How did you hear about us?" or discovery fields: reply with a short natural phrase like "Twitter / X", "LinkedIn", "A friend", or "Online".
+- For dropdown fields: reply with EXACTLY one option string from the list above — nothing else.
+- Reply with ONLY the answer text. No JSON, no quotes, no preamble, no explanation.`;
+
+  // Use Haiku for speed/cost — essay answers don't need Sonnet
+  let response;
+  let attempts = 0;
+  while (attempts < 3) {
+    response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 300, messages: [{ role: 'user', content: prompt }] })
+    });
+    if (response.status === 429 || response.status === 529 || response.status >= 500) {
+      const retryAfter = parseInt(response.headers.get('Retry-After') || '0', 10) * 1000;
+      await new Promise(r => setTimeout(r, retryAfter > 0 ? retryAfter : 2000));
+      attempts++; continue;
+    }
+    break;
+  }
+  if (!response.ok) return {};
+  const data = await response.json();
+  const answer = data.content?.[0]?.text?.trim() || null;
+  return answer ? { answer } : {};
 }
 
 // ── Pass 3: Claude text fill ───────────────────────────────────────────────
@@ -443,9 +611,14 @@ Example output:
 }
 
 // ── Pass 4: Claude vision fill ─────────────────────────────────────────────
-// Vision always uses Anthropic (Llama 3.3 70B has no vision support)
 async function handleClaudeVisionFill({ fields, profile, pageContext, windowId }) {
-  const { apiKey } = await chrome.storage.local.get(['apiKey']);
+  // Check if current provider supports vision
+  const { aiProvider, apiKey } = await chrome.storage.local.get(['aiProvider', 'apiKey']);
+  const provider = aiProvider || 'anthropic';
+  if (!PROVIDER_CAPS[provider]?.supportsVision) {
+    return { skipped: true, reason: `Vision pass skipped (${provider === 'replicate' ? 'Llama 3' : provider} does not support vision).` };
+  }
+
   if (!apiKey) return { error: 'Vision fill requires an Anthropic API key' };
 
   let screenshotDataUrl;

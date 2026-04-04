@@ -1,5 +1,8 @@
 'use strict';
 
+// Open port to background so it can detect popup lifecycle (Replicate polling cancellation)
+const _fillrPort = chrome.runtime.connect({ name: 'fillr-fill' });
+
 const PROFILE_KEYS = [
   'firstName', 'lastName',
   'email', 'phone',
@@ -8,12 +11,23 @@ const PROFILE_KEYS = [
   'yearsExp', 'jobTitle', 'company', 'context'
 ];
 
+// Core keys used for completeness indicator (item 20)
+const CORE_PROFILE_KEYS = [
+  'firstName', 'lastName', 'email', 'phone',
+  'address1', 'city', 'state', 'zip', 'country',
+  'jobTitle', 'company', 'yearsExp',
+  'linkedin', 'github', 'website', 'twitter', 'instagram'
+];
+
 // ── Multi-profile state ───────────────────────────────────────────────────────
 let profiles = [];
 let activeProfile = 0;
 
 // ── Site assignments state ────────────────────────────────────────────────────
 let siteAssignments = {};
+
+// ── Current tab hostname ──────────────────────────────────────────────────────
+let currentHostname = '';
 
 function emptyProfile(name) {
   const p = { name };
@@ -26,6 +40,7 @@ function loadProfileIntoForm(profile) {
     const el = document.getElementById(key);
     if (el) el.value = profile[key] || '';
   });
+  updateCompleteness();
 }
 
 function readFormIntoProfile() {
@@ -51,6 +66,29 @@ function saveProfiles(callback) {
   chrome.storage.local.set({ profiles, activeProfile }, callback);
 }
 
+// ── Completeness indicator (item 20) ─────────────────────────────────────────
+function updateCompleteness() {
+  const profile = profiles[activeProfile] || {};
+  const filled = CORE_PROFILE_KEYS.filter(k => profile[k] && String(profile[k]).trim()).length;
+  const total = CORE_PROFILE_KEYS.length;
+  const pct = filled / total;
+  const el = document.getElementById('completenessIndicator');
+  if (!el) return;
+  el.textContent = `${filled} / ${total}`;
+  el.style.color = pct >= 0.8 ? '#C9A96E' : pct >= 0.5 ? '#888' : '#4A4A4A';
+  el.title = pct >= 1 ? 'Profile complete' : 'Click to go to first empty field';
+}
+
+// Click completeness indicator → scroll to first empty core field
+document.getElementById('completenessIndicator')?.addEventListener('click', () => {
+  const profile = profiles[activeProfile] || {};
+  const emptyKey = CORE_PROFILE_KEYS.find(k => !profile[k] || !String(profile[k]).trim());
+  if (emptyKey) {
+    const el = document.getElementById(emptyKey);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); }
+  }
+});
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -61,24 +99,44 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     });
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     document.getElementById(`tab-${target}`).classList.add('active');
+    if (target === 'settings') renderFillStats();
   });
 });
 
-// ── Toast helper ──────────────────────────────────────────────────────────────
-let toastTimer = null;
+// ── Toast queue (item 28) ─────────────────────────────────────────────────────
+const toastQueue = [];
+let toastActive = false;
 
 function showToast(msg, isError = false) {
-  clearTimeout(toastTimer);
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.className = 'toast' + (isError ? ' error' : '');
-  void toast.offsetWidth;
-  toast.classList.add('show');
-  toastTimer = setTimeout(() => toast.classList.remove('show'), isError ? 4000 : 2800);
+  toastQueue.push({ msg, isError });
+  if (!toastActive) processToastQueue();
+}
+
+function processToastQueue() {
+  if (!toastQueue.length) { toastActive = false; return; }
+  // Collapse many pending notifications
+  if (toastQueue.length >= 3) {
+    const count = toastQueue.length;
+    toastQueue.length = 0;
+    toastQueue.push({ msg: `${count} notifications`, isError: false });
+  }
+  toastActive = true;
+  const { msg, isError } = toastQueue.shift();
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast' + (isError ? ' error' : '');
+  void el.offsetWidth; // reflow
+  el.classList.add('show');
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => processToastQueue(), 300);
+  }, isError ? 4000 : 2800);
 }
 
 function showToastWithUndo(msg, onUndo) {
-  clearTimeout(toastTimer);
+  // Flush queue and show immediately
+  toastQueue.length = 0;
+  toastActive = true;
   const toast = document.getElementById('toast');
   toast.innerHTML = '';
   const text = document.createTextNode(msg + ' ');
@@ -87,7 +145,7 @@ function showToastWithUndo(msg, onUndo) {
   undoBtn.textContent = 'Undo';
   undoBtn.addEventListener('click', () => {
     toast.classList.remove('show');
-    clearTimeout(toastTimer);
+    toastActive = false;
     onUndo();
   });
   toast.appendChild(text);
@@ -95,7 +153,10 @@ function showToastWithUndo(msg, onUndo) {
   toast.className = 'toast';
   void toast.offsetWidth;
   toast.classList.add('show');
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 4500);
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => { toastActive = false; processToastQueue(); }, 300);
+  }, 4500);
 }
 
 // ── Save indicator ────────────────────────────────────────────────────────────
@@ -111,8 +172,67 @@ function showSaveIndicator(state) {
   }
 }
 
+// ── Test button state manager (item 30) ──────────────────────────────────────
+function setTestBtnState(btn, state) {
+  btn.className = btn.className.replace(/\bbtn-(testing|valid|invalid)\b/g, '').trim();
+  if (state === 'testing') {
+    btn.disabled = true;
+    btn.textContent = 'Testing…';
+    btn.classList.add('btn-testing');
+  } else if (state === 'valid') {
+    btn.disabled = false;
+    btn.textContent = '✓ Valid';
+    btn.classList.add('btn-valid');
+    setTimeout(() => setTestBtnState(btn, 'idle'), 3000);
+  } else if (state === 'invalid') {
+    btn.disabled = false;
+    btn.textContent = '✗ Invalid key';
+    btn.classList.add('btn-invalid');
+    setTimeout(() => setTestBtnState(btn, 'idle'), 3000);
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Test';
+  }
+}
+
+// ── Fill stats rendering (item 19) ───────────────────────────────────────────
+function renderFillStats() {
+  chrome.storage.local.get('fillAnalytics', ({ fillAnalytics = [] }) => {
+    const el = document.getElementById('statsContent');
+    if (!el) return;
+    if (!fillAnalytics.length) {
+      el.innerHTML = '<p class="hint">No fills recorded yet.</p>';
+      return;
+    }
+
+    const totalFills = fillAnalytics.length;
+    const avgFields = Math.round(fillAnalytics.reduce((s, e) => s + (e.filledFields || 0), 0) / totalFills);
+
+    // Top 5 domains
+    const domainCounts = {};
+    fillAnalytics.forEach(e => { if (e.hostname) domainCounts[e.hostname] = (domainCounts[e.hostname] || 0) + 1; });
+    const topDomains = Object.entries(domainCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const maxCount = topDomains[0]?.[1] || 1;
+
+    el.innerHTML = `
+      <p class="hint" style="margin-bottom:8px">Total fills: <strong style="color:var(--text-primary)">${totalFills}</strong> · Avg fields: <strong style="color:var(--text-primary)">${avgFields}</strong></p>
+      ${topDomains.length ? `
+        <div class="stat-bar-wrap">
+          ${topDomains.map(([domain, count]) => `
+            <div class="stat-bar-row">
+              <span style="min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${domain}</span>
+              <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.round((count/maxCount)*100)}%"></div></div>
+              <span style="min-width:20px;text-align:right">${count}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    `;
+  });
+}
+
 // ── Load stored values on popup open ─────────────────────────────────────────
-chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKey', 'aiProvider', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'siteAssignments', 'signupHistory'], data => {
+chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKey', 'aiProvider', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'siteAssignments', 'signupHistory', 'fieldOverrides'], data => {
   if (data.profiles && data.profiles.length > 0) {
     profiles = data.profiles;
     activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
@@ -140,21 +260,33 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKe
   populateSiteAssignSelect();
   renderSiteAssignList();
   renderSignupHistory(signupHistory);
+  setupOverrideBadges(data.fieldOverrides || {});
 
-  // Load current site's assignment
+  // Load current site info
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
     if (!tabs[0]) return;
     try {
-      const hostname = new URL(tabs[0].url).hostname;
-      document.getElementById('siteAssignDomain').textContent = hostname;
+      const url = new URL(tabs[0].url);
+      currentHostname = url.hostname;
+      document.getElementById('siteAssignDomain').textContent = currentHostname;
       const sel = document.getElementById('siteAssignProfile');
-      const assigned = siteAssignments[hostname];
+      const assigned = siteAssignments[currentHostname];
       sel.value = assigned !== undefined ? String(assigned) : '';
+
+      // Auto-detect signup URL (item 27)
+      const urlInput = document.getElementById('signupUrl');
+      const hintEl = document.getElementById('signupUrlHint');
+      const urlPatterns = /lu\.ma|eventbrite\.com|partiful\.com|rsvp\.|forms\.|airtable\.com|tally\.so|typeform\.com/i;
+      const pathPatterns = /\/(register|signup|rsvp|apply)(\/|$|\?)/i;
+      const autoDetected = urlPatterns.test(url.hostname) || pathPatterns.test(url.pathname);
+      if (autoDetected) {
+        urlInput.value = tabs[0].url;
+        if (hintEl) hintEl.style.display = 'block';
+      }
     } catch {}
   });
 
-  // Show onboarding banner if first run (all fields empty, never seen)
-  // Exclude 'context' — it's supplemental and shouldn't block the banner
+  // Onboarding banner
   if (!data.onboardingSeen) {
     const coreKeys = PROFILE_KEYS.filter(k => k !== 'context');
     const allEmpty = coreKeys.every(k => !profiles[activeProfile][k]);
@@ -164,6 +296,89 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKe
     }
   }
 });
+
+// ── Per-field override badges (item 18) ──────────────────────────────────────
+function setupOverrideBadges(fieldOverrides) {
+  if (!currentHostname) return;
+  document.querySelectorAll('#tab-details label[for]').forEach(label => {
+    const forId = label.getAttribute('for');
+    if (!forId) return;
+    // Map field id to profile key
+    const profileKey = forId; // field ids match profile keys
+    const overrideKey = `${currentHostname}::${profileKey}`;
+    const badge = label.querySelector('.override-badge');
+    if (fieldOverrides[overrideKey] !== undefined) {
+      if (!badge) {
+        const b = document.createElement('span');
+        b.className = 'override-badge';
+        b.textContent = '⊕';
+        b.title = `Override active for ${currentHostname}: "${fieldOverrides[overrideKey]}"`;
+        label.appendChild(b);
+      }
+    } else if (badge) {
+      badge.remove();
+    }
+
+    // Right-click to open override editor (item 18)
+    label.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showOverrideEditor(forId, currentHostname, fieldOverrides);
+    });
+  });
+}
+
+function showOverrideEditor(fieldId, hostname, fieldOverrides) {
+  // Remove any existing editor
+  document.querySelectorAll('.override-row').forEach(r => r.remove());
+
+  const fieldEl = document.getElementById(fieldId);
+  if (!fieldEl) return;
+  const overrideKey = `${hostname}::${fieldId}`;
+  const currentOverride = fieldOverrides[overrideKey] || '';
+
+  const row = document.createElement('div');
+  row.className = 'override-row';
+  row.innerHTML = `
+    <span style="color:var(--text-muted);font-size:10px;white-space:nowrap">${hostname}</span>
+    <input type="text" placeholder="Override value…" value="${currentOverride.replace(/"/g, '&quot;')}" />
+    <button class="btn btn-sm btn-primary" title="Save override">Save</button>
+    <button class="btn btn-sm btn-ghost" title="Remove override">✕</button>
+  `;
+  fieldEl.parentElement.insertBefore(row, fieldEl.nextSibling);
+
+  const input = row.querySelector('input');
+  const saveBtn = row.querySelectorAll('button')[0];
+  const removeBtn = row.querySelectorAll('button')[1];
+
+  saveBtn.addEventListener('click', () => {
+    const val = input.value.trim();
+    if (val) {
+      fieldOverrides[overrideKey] = val;
+    } else {
+      delete fieldOverrides[overrideKey];
+    }
+    chrome.storage.local.set({ fieldOverrides }, () => {
+      row.remove();
+      setupOverrideBadges(fieldOverrides);
+      showToast(`Override ${val ? 'saved' : 'removed'} for ${fieldId}`);
+    });
+  });
+
+  removeBtn.addEventListener('click', () => {
+    delete fieldOverrides[overrideKey];
+    chrome.storage.local.set({ fieldOverrides }, () => {
+      row.remove();
+      setupOverrideBadges(fieldOverrides);
+      showToast(`Override removed for ${fieldId}`);
+    });
+  });
+
+  input.focus();
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') saveBtn.click();
+    if (e.key === 'Escape') row.remove();
+  });
+}
 
 // ── Onboarding banner dismiss ─────────────────────────────────────────────────
 const dismissBtn = document.getElementById('dismissOnboarding');
@@ -183,7 +398,7 @@ document.getElementById('profileSelect').addEventListener('change', e => {
   saveProfiles();
 });
 
-// ── Inline profile name editing ───────────────────────────────────────────────
+// ── Inline profile name editing (item 29) ─────────────────────────────────────
 let _profileEditMode = null; // 'new' | 'rename'
 
 function showProfileNameInput(mode) {
@@ -211,6 +426,7 @@ function showProfileNameInput(mode) {
 }
 
 function hideProfileNameInput() {
+  // Restore original name without saving (item 29)
   _profileEditMode = null;
   document.getElementById('profileSelect').style.display = '';
   document.getElementById('profileNameInput').style.display = 'none';
@@ -222,6 +438,7 @@ function hideProfileNameInput() {
 }
 
 function commitProfileName() {
+  if (!_profileEditMode) return;
   const name = document.getElementById('profileNameInput').value.trim();
   if (!name) { showToast('Name cannot be empty', true); return; }
 
@@ -256,8 +473,10 @@ document.getElementById('profileNameInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); commitProfileName(); }
   if (e.key === 'Escape') { e.preventDefault(); hideProfileNameInput(); }
 });
-
-
+// Blur commits only if edit mode is still active (item 29)
+document.getElementById('profileNameInput').addEventListener('blur', () => {
+  if (_profileEditMode) commitProfileName();
+});
 
 document.getElementById('deleteProfile').addEventListener('click', () => {
   if (profiles.length <= 1) {
@@ -283,7 +502,7 @@ document.getElementById('saveDetails').addEventListener('click', () => {
     return;
   }
 
-  clearTimeout(autoSaveTimer); // flush any pending auto-save
+  clearTimeout(autoSaveTimer);
   readFormIntoProfile();
   if (yearsExpVal !== '') profiles[activeProfile].yearsExp = isNaN(exp) ? '' : String(exp);
   saveProfiles(() => showToast('Details saved'));
@@ -304,10 +523,7 @@ document.getElementById('aiProvider').addEventListener('change', e => {
 // ── Save API Key ──────────────────────────────────────────────────────────────
 document.getElementById('saveApiKey').addEventListener('click', () => {
   const apiKey = document.getElementById('apiKey').value.trim();
-  if (!apiKey) {
-    showToast('Enter an API key first', true);
-    return;
-  }
+  if (!apiKey) { showToast('Enter an API key first', true); return; }
   chrome.storage.local.set({ apiKey }, () => showToast('API key saved'));
 });
 
@@ -317,18 +533,17 @@ document.getElementById('saveReplicateKey').addEventListener('click', () => {
   chrome.storage.local.set({ replicateApiKey: key }, () => showToast('Replicate key saved'));
 });
 
+// ── Test API Keys (item 30) ───────────────────────────────────────────────────
 document.getElementById('testReplicateKey').addEventListener('click', () => {
   const key = document.getElementById('replicateApiKey').value.trim();
   if (!key) { showToast('Enter a Replicate API key first', true); return; }
   const btn = document.getElementById('testReplicateKey');
-  btn.disabled = true;
-  btn.textContent = 'Testing…';
+  setTestBtnState(btn, 'testing');
   chrome.runtime.sendMessage({ action: 'testReplicateKey', replicateApiKey: key }, response => {
-    btn.disabled = false;
-    btn.textContent = 'Test';
     if (response && response.ok) {
-      showToast('Replicate key is valid ✓');
+      setTestBtnState(btn, 'valid');
     } else {
+      setTestBtnState(btn, 'invalid');
       showToast((response && response.error) || 'Replicate key test failed', true);
     }
   });
@@ -342,22 +557,16 @@ document.getElementById('toggleReplicateKey').addEventListener('click', () => {
   document.getElementById('repEyeOffIcon').style.display = show ? '' : 'none';
 });
 
-// ── Test API Key ──────────────────────────────────────────────────────────────
 document.getElementById('testApiKey').addEventListener('click', () => {
   const apiKey = document.getElementById('apiKey').value.trim();
-  if (!apiKey) {
-    showToast('Enter an API key first', true);
-    return;
-  }
+  if (!apiKey) { showToast('Enter an API key first', true); return; }
   const btn = document.getElementById('testApiKey');
-  btn.disabled = true;
-  btn.textContent = 'Testing…';
+  setTestBtnState(btn, 'testing');
   chrome.runtime.sendMessage({ action: 'testApiKey', apiKey }, response => {
-    btn.disabled = false;
-    btn.textContent = 'Test';
     if (response && response.ok) {
-      showToast('API key is valid ✓');
+      setTestBtnState(btn, 'valid');
     } else {
+      setTestBtnState(btn, 'invalid');
       showToast((response && response.error) || 'API key test failed', true);
     }
   });
@@ -402,26 +611,34 @@ document.getElementById('addCurrentSite').addEventListener('click', () => {
       const textarea = document.getElementById('blockedSites');
       const existing = textarea.value.trim();
       const sites = existing ? existing.split('\n').map(s => s.trim()).filter(Boolean) : [];
-      if (!sites.includes(url.hostname)) {
-        sites.push(url.hostname);
-        textarea.value = sites.join('\n');
-        showToast(`Added ${url.hostname}`);
-      } else {
-        showToast('Site already blocked');
-      }
+      const addCurrentSiteBtn = document.getElementById('addCurrentSite');
+      const alreadyExists = sites.includes(url.hostname);
+
+      if (!alreadyExists) sites.push(url.hostname);
+      textarea.value = sites.join('\n');
+
+      // Inline confirmation (item 31)
+      const oldConfirm = addCurrentSiteBtn.parentElement.querySelector('.site-add-confirm');
+      if (oldConfirm) oldConfirm.remove();
+      const confirmEl = document.createElement('span');
+      confirmEl.className = 'site-add-confirm';
+      confirmEl.textContent = alreadyExists ? 'Already blocked' : `${url.hostname} blocked`;
+      addCurrentSiteBtn.parentElement.insertBefore(confirmEl, addCurrentSiteBtn.nextSibling);
+      setTimeout(() => confirmEl.remove(), 2000);
     } catch {}
   });
 });
 
 // ── Import / Export ───────────────────────────────────────────────────────────
 document.getElementById('exportData').addEventListener('click', () => {
-  chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'signupHistory'], data => {
+  chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'signupHistory', 'fieldOverrides'], data => {
     const exportObj = {
       profiles: data.profiles || profiles,
       activeProfile: data.activeProfile ?? activeProfile,
       blockedSites: data.blockedSites || [],
       siteAssignments: data.siteAssignments || {},
-      signupHistory: data.signupHistory || []
+      signupHistory: data.signupHistory || [],
+      fieldOverrides: data.fieldOverrides || {}
     };
     const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -453,15 +670,18 @@ document.getElementById('importFile').addEventListener('change', e => {
       activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
       const blockedSites = data.blockedSites || [];
       siteAssignments = (data.siteAssignments && typeof data.siteAssignments === 'object' && !Array.isArray(data.siteAssignments)) ? data.siteAssignments : {};
+      // Validate signupHistory entries
       signupHistory = Array.isArray(data.signupHistory)
         ? data.signupHistory.filter(e => e && typeof e === 'object' && e.url && typeof e.timestamp === 'number' && e.status)
         : [];
-      chrome.storage.local.set({ profiles, activeProfile, blockedSites, siteAssignments, signupHistory }, () => {
+      const fieldOverrides = (data.fieldOverrides && typeof data.fieldOverrides === 'object') ? data.fieldOverrides : {};
+      chrome.storage.local.set({ profiles, activeProfile, blockedSites, siteAssignments, signupHistory, fieldOverrides }, () => {
         populateProfileSelect();
         loadProfileIntoForm(profiles[activeProfile]);
         document.getElementById('blockedSites').value = blockedSites.join('\n');
         renderSiteAssignList();
         renderSignupHistory(signupHistory);
+        setupOverrideBadges(fieldOverrides);
         showToast('Imported successfully');
       });
     } catch {
@@ -476,7 +696,6 @@ document.getElementById('importFile').addEventListener('change', e => {
 function populateSiteAssignSelect() {
   const sel = document.getElementById('siteAssignProfile');
   if (!sel) return;
-  // Keep the "Auto" option, repopulate profiles
   sel.innerHTML = '<option value="">Auto</option>';
   profiles.forEach((p, i) => {
     const opt = document.createElement('option');
@@ -599,7 +818,6 @@ document.getElementById('clearHistory')?.addEventListener('click', () => {
 });
 
 // ── Quick Signup ──────────────────────────────────────────────────────────────
-// Declared at module scope so visibilitychange can remove it on popup close
 let signupProgressListener = null;
 
 (function () {
@@ -609,7 +827,6 @@ let signupProgressListener = null;
   let isRunning = false;
 
   function setStatus(msg, variant = 'ok') {
-    // variant: 'ok' | 'error' | 'warn'
     statusEl.textContent = msg;
     statusEl.className = `signup-status signup-status-${variant}`;
     statusEl.style.display = msg ? 'block' : 'none';
@@ -618,20 +835,22 @@ let signupProgressListener = null;
   signupProgressListener = function (message) {
     if (!isRunning) return;
     if (message.action === 'signupProgress') {
-      btn.textContent = message.stage === 'loading' ? 'Loading page…' : 'Filling form…';
+      if (message.stage === 'loading') {
+        btn.textContent = 'Loading page…';
+      } else if (message.stage === 'filling') {
+        const step = message.step ? ` (step ${message.step})` : '';
+        btn.textContent = `Filling form…${step}`;
+      } else if (message.stage === 'thinking') {
+        const elapsed = message.elapsed ? ` (${message.elapsed}s)` : '';
+        const coldNote = message.coldStart ? ' — cold start, hang tight' : '';
+        btn.textContent = `AI thinking…${elapsed}${coldNote}`;
+      }
     }
   };
   chrome.runtime.onMessage.addListener(signupProgressListener);
 
-  // Pre-fill URL if current tab looks like an event page
-  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
-    if (!tabs[0]) return;
-    try {
-      const url = new URL(tabs[0].url);
-      if (/lu\.ma|eventbrite\.com|partiful\.com/i.test(url.hostname)) {
-        urlInput.value = tabs[0].url;
-      }
-    } catch {}
+  urlInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); btn.click(); }
   });
 
   btn.addEventListener('click', () => {
@@ -655,36 +874,45 @@ let signupProgressListener = null;
         return;
       }
 
-      // CAPTCHA detected — yellow warning, no red
       if (response.captcha) {
-        setStatus('This page has a CAPTCHA — open it manually and use Fill Out instead.', 'warn');
+        setStatus('⚠ CAPTCHA detected — open it manually and use Fill Out instead.', 'warn');
         addToSignupHistory(url, 'captcha', 0);
         return;
       }
 
-      // Hard error (tab create failed, timeout, cancelled, etc.)
       if (response.error) {
-        setStatus(response.error, 'error');
-        // Only log as failed if a fill wasn't attempted (error came before submission)
+        setStatus(`✕ ${response.error}`, response.warn ? 'warn' : 'error');
         addToSignupHistory(url, 'failed', 0);
         return;
       }
 
       const filled = response.filled || 0;
 
+      // Required fields still empty — tab was kept open for manual completion
+      if (response.requiredUnfilled && response.requiredUnfilled.length > 0) {
+        const shown = response.requiredUnfilled.slice(0, 3).join(', ');
+        const extra = response.requiredUnfilled.length > 3
+          ? ` +${response.requiredUnfilled.length - 3} more`
+          : '';
+        setStatus(
+          `✕ ${filled} field${filled !== 1 ? 's' : ''} filled. Still required: ${shown}${extra}. Tab opened for manual completion.`,
+          'warn'
+        );
+        addToSignupHistory(url, 'failed', filled);
+        return;
+      }
+
       if (response.confirmed) {
-        // DOM text or URL change confirmed success
-        setStatus(`Signed up! ${filled} field${filled !== 1 ? 's' : ''} filled.`);
+        setStatus(`✓ Signed up! ${filled} field${filled !== 1 ? 's' : ''} filled.`);
         addToSignupHistory(url, 'confirmed', filled);
         urlInput.value = '';
       } else if (response.submitted) {
-        // Form was submitted but no DOM confirmation (email-verification flows)
-        setStatus('Submitted.');
+        // Submitted but no confirmation text visible — likely email-verification flow
+        setStatus(`✓ Submitted — check your email to confirm. ${filled} field${filled !== 1 ? 's' : ''} filled.`);
         addToSignupHistory(url, 'submitted', filled);
         urlInput.value = '';
       } else {
-        // Fill ran but submit button was never found/clicked
-        setStatus(`Couldn't submit the form — open it manually and use Fill Out instead.`, 'error');
+        setStatus(`✕ Couldn't submit the form — open it manually and use Fill Out instead.`, 'error');
         addToSignupHistory(url, 'failed', filled);
       }
     });
@@ -712,7 +940,6 @@ function triggerFill() {
     if (!tabs[0]) { resetButtons(); return; }
     lastFillTabId = tabs[0].id;
 
-    // 12-second timeout so the button never hangs
     const timeout = setTimeout(() => {
       const label = document.querySelector('#fillPageTop .btn-hover-label');
       if (label) label.textContent = 'Fill Out';
@@ -722,7 +949,6 @@ function triggerFill() {
 
     chrome.tabs.sendMessage(tabs[0].id, { action: 'fill' }, response => {
       clearTimeout(timeout);
-      // Reset progress label back to default before re-enabling
       const label = document.querySelector('#fillPageTop .btn-hover-label');
       if (label) label.textContent = 'Fill Out';
       resetButtons();
@@ -734,6 +960,22 @@ function triggerFill() {
 
       if (response.blocked) {
         showToast('This site is blocked — remove it in Settings', true);
+      } else if (response.iframeWarning) {
+        // Yellow-ish warning — use isError=false but different message
+        showToast(response.iframeWarning);
+        if (response.apiError) showToast(response.apiError, true);
+        else if (response.filled > 0) {
+          const msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
+          if (response.hasUndo && lastFillTabId) {
+            showToastWithUndo(msg, () => {
+              chrome.tabs.sendMessage(lastFillTabId, { action: 'undoFill' })
+                .then(r => { if (r && r.restored > 0) showToast(`Undid ${r.restored} field${r.restored !== 1 ? 's' : ''}`); })
+                .catch(() => {});
+            });
+          } else {
+            showToast(msg);
+          }
+        }
       } else if (response.apiError) {
         showToast(response.apiError, true);
       } else if (response.filled === 0) {
@@ -757,7 +999,6 @@ function triggerFill() {
 document.getElementById('fillPageTop').addEventListener('click', triggerFill);
 
 // Listen for progress updates from the content script during AI passes.
-// Store the reference so we can remove it when the popup is hidden.
 function progressListener(message) {
   if (message.action === 'fillProgress' && isFilling) {
     const label = document.querySelector('#fillPageTop .btn-hover-label');
@@ -767,6 +1008,7 @@ function progressListener(message) {
 chrome.runtime.onMessage.addListener(progressListener);
 
 // ── Auto-save on typing ───────────────────────────────────────────────────────
+let _completenessDebounce = null;
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   showSaveIndicator('saving');
@@ -774,6 +1016,9 @@ function scheduleAutoSave() {
     readFormIntoProfile();
     saveProfiles(() => showSaveIndicator('saved'));
   }, 800);
+  // Update completeness indicator with debounce
+  clearTimeout(_completenessDebounce);
+  _completenessDebounce = setTimeout(updateCompleteness, 200);
 }
 
 document.getElementById('tab-details').querySelectorAll('input, textarea').forEach(el => {
@@ -803,5 +1048,3 @@ document.addEventListener('keydown', e => {
     else if (activeTab === 'settings') document.getElementById('saveApiKey').click();
   }
 });
-
-

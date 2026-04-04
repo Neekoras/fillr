@@ -54,7 +54,10 @@
       <button type="button" id="dismissOnboarding" class="onboarding-dismiss" aria-label="Dismiss">×</button>
     </div>
 
-    <p class="section-title">Personal</p>
+    <div class="section-title-row">
+      <p class="section-title">Personal</p>
+      <span id="completenessIndicator" class="completeness-indicator" title="Click to go to first empty field"></span>
+    </div>
     <div class="form-grid">
       <div class="form-group">
         <label for="firstName">First Name</label>
@@ -238,6 +241,11 @@
       <p class="hint">Automatically use a profile when visiting a site.</p>
     </div>
 
+    <p class="section-title">Fill Stats</p>
+    <div class="settings-group" id="fillStatsSection">
+      <div id="statsContent"><p class="hint">No fills recorded yet.</p></div>
+    </div>
+
     <p class="section-title">Data</p>
     <div class="settings-group">
       <div class="btn-row-inline">
@@ -258,6 +266,7 @@
       <label for="signupUrl">Event URL</label>
       <input type="url" id="signupUrl" placeholder="https://lu.ma/…" autocomplete="off" />
     </div>
+    <p id="signupUrlHint" class="hint" style="display:none; color:#4A4A4A; font-family:var(--font-mono); font-size:10px; margin-top:4px;">Current page detected</p>
     <div class="btn-row" style="margin-top:16px">
       <button class="btn btn-primary btn-full" id="signupBtn" title="Open the URL and auto-fill + submit the signup form">Sign Up</button>
     </div>

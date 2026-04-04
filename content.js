@@ -11,6 +11,11 @@
       background: rgba(201,169,110,0.08) !important;
       transition: outline 0.3s, background 0.3s;
     }
+    .autofill-error {
+      outline: 1px solid #EF4444 !important;
+      background: rgba(239,68,68,0.08) !important;
+      transition: outline 0.3s, background 0.3s;
+    }
     #__autofill-float-btn__ {
       position: fixed;
       bottom: 20px;
@@ -188,29 +193,57 @@ function stripInvisible(str) {
   return (str || '').replace(/[\u200B\u200C\u200D\uFEFF\u00AD\u00A0]/g, '').trim();
 }
 
-// ── Label text cache (prevents calling getLabelText 3x per field) ─────────────
+// ── Simple debounce helper ─────────────────────────────────────────────────────
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+// ── Label text cache (WeakMap + attribute flag for SPA invalidation) ──────────
 const labelCache = new WeakMap();
 
+// ── Recursive shadow DOM field collection (item 1) ────────────────────────────
+function collectShadowFields(root, depth = 0, maxDepth = 4) {
+  if (depth > maxDepth) return [];
+  const fields = Array.from(root.querySelectorAll(FIELD_SELECTOR));
+  root.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) fields.push(...collectShadowFields(el.shadowRoot, depth + 1, maxDepth));
+  });
+  return fields;
+}
+
 // ── Collect visible, fillable fields ─────────────────────────────────────────
-function collectFields() {
+function collectFields(fillAll = false) {
   const main = Array.from(document.querySelectorAll(FIELD_SELECTOR));
 
-  // Basic one-level shadow DOM support
-  const shadow = [];
-  document.querySelectorAll('*').forEach(el => {
-    if (el.shadowRoot) {
-      Array.from(el.shadowRoot.querySelectorAll(FIELD_SELECTOR)).forEach(f => shadow.push(f));
-    }
-  });
+  // Recursive shadow DOM support (item 1)
+  const shadow = collectShadowFields(document, 0, 4);
+  const all = [...main, ...shadow];
 
-  return [...main, ...shadow].filter(el => {
+  // Same-origin iframe field inclusion (item 2)
+  let crossOriginFrameCount = 0;
+  for (const frame of document.querySelectorAll('iframe')) {
+    try {
+      const doc = frame.contentDocument;
+      if (doc) {
+        Array.from(doc.querySelectorAll(FIELD_SELECTOR)).forEach(f => all.push(f));
+      }
+    } catch {
+      crossOriginFrameCount++;
+    }
+  }
+  if (crossOriginFrameCount > 0) {
+    window.__fillrCrossOriginFrames = crossOriginFrameCount;
+  }
+
+  const filtered = all.filter(el => {
     if (el.disabled || el.readOnly) return false;
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     if (el.type === 'checkbox') return !el.checked;
     if (el.type === 'radio') {
       if (!el.name) return false;
-      const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+      const group = Array.from((el.getRootNode() || document).querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
       if (group.some(r => r.checked)) return false;
       return group[0] === el;
     }
@@ -220,20 +253,30 @@ function collectFields() {
     if (stripInvisible(currentVal) !== '') return false;
     return true;
   });
+
+  // fillAll=false: prefer fields inside a <form> over orphan inputs (item 22)
+  if (!fillAll) {
+    const inForm = filtered.filter(el => el.closest('form'));
+    if (inForm.length > 0) return inForm;
+  }
+
+  return filtered;
 }
 
 // ── Get a label text for a field ─────────────────────────────────────────────
 const INPUT_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
 
 function getLabelText(el) {
-  if (labelCache.has(el)) return labelCache.get(el);
+  // Use attribute flag for SPA-safe cache invalidation (item 5)
+  if (el.dataset && el.dataset.fillrLabelCached !== undefined) return labelCache.get(el) || '';
 
   let result = '';
 
   // 1. Explicit <label for="id">
   if (el.id) {
-    const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-    if (label) { result = label.textContent.trim(); }
+    const labelEl = (el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document)
+      .querySelector(`label[for="${CSS.escape(el.id)}"]`);
+    if (labelEl) { result = labelEl.textContent.trim(); }
   }
   if (!result) {
     // 2. Parent <label>
@@ -288,9 +331,20 @@ function getLabelText(el) {
     }
   }
 
+  // Store with attribute flag for SPA invalidation
+  if (el.dataset) el.dataset.fillrLabelCached = '';
   labelCache.set(el, result);
   return result;
 }
+
+// MutationObserver to clear stale label cache on SPA navigation (item 5)
+const labelCacheObserver = new MutationObserver(debounce(() => {
+  document.querySelectorAll('[data-fillr-label-cached]').forEach(el => {
+    delete el.dataset.fillrLabelCached;
+    labelCache.delete(el);
+  });
+}, 200));
+labelCacheObserver.observe(document.body, { childList: true, subtree: true });
 
 // ── Normalize string for matching ─────────────────────────────────────────────
 function normalize(str) {
@@ -329,8 +383,22 @@ function fuzzyMatch(el) {
   return null;
 }
 
-// ── Fill a single field ───────────────────────────────────────────────────────
-function fillField(el, value) {
+// ── Phone number formatting (item 24) ─────────────────────────────────────────
+function formatPhone(raw, el) {
+  const digits = (raw || '').replace(/\D/g, '');
+  const ph = el.placeholder || '';
+  // Detect format from placeholder
+  if (/\(\d{3}\)\s?\d{3}-\d{4}/.test(ph) || /\(\d{3}\)/.test(ph)) {
+    if (digits.length >= 10) return `(${digits.slice(-10,-7)}) ${digits.slice(-7,-4)}-${digits.slice(-4)}`;
+  }
+  if (/\+1\s?\d{3}\s?\d{3}\s?\d{4}/.test(ph)) {
+    if (digits.length >= 11) return `+${digits[0]} ${digits.slice(1,4)} ${digits.slice(4,7)} ${digits.slice(7,11)}`;
+  }
+  return null; // No detectable format — fill raw
+}
+
+// ── Fill a single field (async for contenteditable paste support) ─────────────
+async function fillField(el, value) {
   if (value === null || value === undefined) return false;
 
   const strVal = String(value);
@@ -338,10 +406,8 @@ function fillField(el, value) {
 
   if (el.type === 'checkbox') {
     const truthy = /^(yes|true|1|checked|on)$/i.test(strVal.trim());
-    // Use native setter so React's synthetic event system sees the change
     const nativeCheckedSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
     if (nativeCheckedSetter) nativeCheckedSetter.call(el, truthy); else el.checked = truthy;
-    // React maps onChange to click; dispatch both for framework compatibility
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.classList.add('autofill-highlight');
@@ -351,8 +417,8 @@ function fillField(el, value) {
 
   if (el.type === 'radio') {
     if (!el.name) return false;
-    const group = Array.from(document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
-    // Empty string means undo — uncheck all
+    const root = el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
+    const group = Array.from(root.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
     if (!strVal.trim()) {
       group.forEach(r => { r.checked = false; r.dispatchEvent(new Event('change', { bubbles: true })); });
       return true;
@@ -370,11 +436,19 @@ function fillField(el, value) {
   }
 
   if (isContentEditable) {
+    // Use ClipboardEvent paste instead of deprecated execCommand (item 4)
     el.focus();
-    document.execCommand('selectAll', false, null);
-    document.execCommand('insertText', false, strVal);
-    if (stripInvisible(el.textContent) !== strVal) el.textContent = strVal;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', strVal);
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    } catch {}
+    // Fallback: check if content changed after paste event
+    await new Promise(r => setTimeout(r, 0));
+    if (stripInvisible(el.textContent) !== strVal) {
+      el.textContent = strVal;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else if (el.type === 'date' && strVal) {
     const d = new Date(strVal);
@@ -382,8 +456,12 @@ function fillField(el, value) {
       el.value = d.toISOString().split('T')[0];
       el.dispatchEvent(new InputEvent('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      // Unparseable date — highlight error and skip (item 7)
+      el.classList.add('autofill-error');
+      setTimeout(() => el.classList.remove('autofill-error'), 3000);
+      return false;
     }
-    // If date is unparseable, skip silently rather than setting an invalid value
   } else if (el.tagName === 'SELECT') {
     const opts = Array.from(el.options).filter(o => o.value !== '');
     const lower = strVal.toLowerCase();
@@ -395,15 +473,33 @@ function fillField(el, value) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
   } else {
+    // Textarea bio truncation at maxLength (item 25)
+    let finalVal = strVal;
+    if (el.tagName === 'TEXTAREA' && el.maxLength > 0 && strVal.length > el.maxLength) {
+      let truncated = strVal.slice(0, el.maxLength - 1);
+      const lastSpace = truncated.lastIndexOf(' ');
+      if (lastSpace > 0) truncated = truncated.slice(0, lastSpace);
+      finalVal = truncated;
+    }
+
     const doc = el.ownerDocument;
     const view = doc.defaultView;
     const proto = el.tagName === 'TEXTAREA'
       ? view.HTMLTextAreaElement.prototype
       : view.HTMLInputElement.prototype;
     const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-    if (nativeSetter) nativeSetter.call(el, strVal); else el.value = strVal;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: strVal }));
+    if (nativeSetter) nativeSetter.call(el, finalVal); else el.value = finalVal;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: finalVal }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
+
+    // React Hook Form + MUI compatibility (item 6)
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    el.dispatchEvent(new Event('focus', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (el.closest?.('.MuiInputBase-root')) {
+      const wrapper = el.closest('.MuiInputBase-root');
+      wrapper.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   }
 
   el.classList.add('autofill-highlight');
@@ -411,14 +507,11 @@ function fillField(el, value) {
   return true;
 }
 
-
 // ── Custom dropdown (non-native select) support ────────────────────────────────
 
 function findCustomDropdowns() {
   const results = [];
   const seen = new Set();
-  // Already-handled native selects — skip their wrappers
-  const nativeSelects = new Set(document.querySelectorAll('select'));
 
   const candidates = [
     ...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="true"]'),
@@ -432,7 +525,6 @@ function findCustomDropdowns() {
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
 
-    // Must either have aria role OR look like a "Select an option" placeholder trigger
     const hasRole = el.getAttribute('role') === 'combobox' ||
       el.getAttribute('aria-haspopup') === 'listbox' ||
       el.getAttribute('aria-haspopup') === 'true';
@@ -454,7 +546,6 @@ function getLabelForCustomDropdown(el) {
     }).filter(Boolean).join(' ');
     if (text) return text;
   }
-  // Walk up looking for a label sibling or parent label text
   let node = el.parentElement;
   for (let depth = 0; depth < 5 && node && node !== document.body; depth++) {
     let sib = node.previousElementSibling;
@@ -476,7 +567,6 @@ function getLabelForCustomDropdown(el) {
 }
 
 function findVisibleDropdownOptions() {
-  // role="option" is the most reliable signal
   const byRole = Array.from(document.querySelectorAll('[role="option"], [role="listbox"] li, [role="listbox"] [role="option"]'))
     .filter(el => {
       const s = window.getComputedStyle(el);
@@ -484,7 +574,6 @@ function findVisibleDropdownOptions() {
     });
   if (byRole.length) return byRole;
 
-  // Fallback: absolute/fixed positioned list that appeared after a click
   const containers = Array.from(document.querySelectorAll('ul, ol, [class*="dropdown"], [class*="options"], [class*="listbox"], [class*="menu"]'))
     .filter(el => {
       const s = window.getComputedStyle(el);
@@ -514,18 +603,32 @@ async function peekDropdownOptions(el) {
       if (opts.length) return opts;
     }
   }
-  // Check parent for pre-rendered hidden options
   const parentOpts = Array.from((el.parentElement || el).querySelectorAll('[role="option"]'))
     .map(o => o.textContent.trim()).filter(Boolean);
   if (parentOpts.length) return parentOpts;
 
-  // Open → collect → close
+  // Hide listbox container before opening to prevent visual flicker (item 8)
+  const ownedEl = ownedId ? document.getElementById(ownedId) : null;
+  const target = ownedEl || el.parentElement;
+  if (target) {
+    target._prevPointerEvents = target.style.pointerEvents;
+    target._prevOpacity = target.style.opacity;
+    target.style.pointerEvents = 'none';
+    target.style.opacity = '0';
+  }
+  await new Promise(r => requestAnimationFrame(r));
+
   el.click();
   el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
   await new Promise(r => setTimeout(r, 400));
-
   const optionEls = findVisibleDropdownOptions();
   const opts = optionEls.map(o => o.textContent.trim()).filter(t => t && !/^(?:select|choose)\b/i.test(t));
+
+  // Restore visibility
+  if (target) {
+    target.style.pointerEvents = target._prevPointerEvents;
+    target.style.opacity = target._prevOpacity;
+  }
 
   // Close
   document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -566,6 +669,31 @@ async function fillCustomDropdown(el, value) {
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
   return true;
 }
+
+// ── Typeahead/autocomplete support (item 23) ──────────────────────────────────
+async function fillTypeahead(el, value) {
+  el.focus();
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  // Type character by character at 30ms intervals
+  for (const char of value) {
+    const current = el.value;
+    if (nativeSetter) nativeSetter.call(el, current + char); else el.value = current + char;
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+    await new Promise(r => setTimeout(r, 30));
+  }
+  // Wait for dropdown to render
+  await new Promise(r => setTimeout(r, 800));
+  // Find and click best match option
+  const options = document.querySelectorAll('[role="option"], [role="listitem"], .autocomplete-suggestion');
+  const lower = value.toLowerCase();
+  const match = Array.from(options).find(o => o.textContent.trim().toLowerCase().startsWith(lower))
+    || Array.from(options).find(o => o.textContent.trim().toLowerCase().includes(lower));
+  if (match) { match.click(); return true; }
+  return false;
+}
+
 // ── Collect page context for Claude ──────────────────────────────────────────
 function getPageContext() {
   const title = document.title || '';
@@ -599,7 +727,7 @@ function fieldDescriptor(el) {
     id: el.id || el.dataset.__fillrIdx || '',
     name: el.name || '',
     placeholder: el.placeholder || '',
-    label: getLabelText(el), // reads from cache
+    label: getLabelText(el),
     type: el.tagName === 'SELECT' ? 'select' : (el.type || el.tagName.toLowerCase()),
   };
   if (el.tagName === 'SELECT') {
@@ -609,7 +737,8 @@ function fieldDescriptor(el) {
       .slice(0, 30);
   }
   if (el.type === 'radio' && el.name) {
-    const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+    const root = el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
+    const group = root.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
     desc.options = Array.from(group).map(r => getLabelText(r) || r.value);
     desc.type = 'radio-group';
   }
@@ -617,10 +746,10 @@ function fieldDescriptor(el) {
 }
 
 // ── Apply a Claude mapping value to a field ───────────────────────────────────
-function applyClaudeValue(el, claudeValue, profile) {
+async function applyClaudeValue(el, claudeValue, profile) {
   if (!claudeValue) return false;
   if (el.tagName === 'SELECT') {
-    if (fillField(el, claudeValue)) return true;
+    if (await fillField(el, claudeValue)) return true;
   }
   const profileVal = profileValue(profile, claudeValue);
   if (profileVal) return fillField(el, profileVal);
@@ -639,7 +768,7 @@ async function autofill() {
   isFilling = true;
   try {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments'], resolve)
+    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments', 'fieldOverrides', 'fillAll'], resolve)
   );
 
   const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
@@ -663,37 +792,80 @@ async function autofill() {
 
   const profile = getProfile(profileData || {});
   const apiKey = storageData.apiKey || '';
+  const fieldOverrides = storageData.fieldOverrides || {};
+  const fillAll = !!storageData.fillAll;
   let apiError = null;
 
-  const fields = collectFields();
+  // Cross-origin iframe tracking reset
+  window.__fillrCrossOriginFrames = 0;
+
+  const fields = collectFields(fillAll);
   let filledCount = 0;
   let firstFilledEl = null;
   const unmatched = [];
 
-  // Snapshot original values for undo (before any fills)
+  // Snapshot original values for undo (before any fills) — use defaultValue for pre-filled detection (item 10)
   const originalValues = new Map();
   for (const el of fields) {
     if (el.type === 'checkbox') {
       originalValues.set(el, el.checked ? 'checked' : 'unchecked');
     } else if (el.type === 'radio' && el.name) {
-      const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      const root = el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
+      const group = root.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
       originalValues.set(el, Array.from(group).find(r => r.checked)?.value || '');
     } else {
-      originalValues.set(el, el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
-        ? el.value : el.textContent);
+      const snapshotVal = el.getAttribute('value') ?? el.defaultValue ?? el.value ?? '';
+      originalValues.set(el, snapshotVal || (el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? el.value : el.textContent));
     }
   }
 
   // Pre-populate label cache for all fields in one pass
   fields.forEach(el => getLabelText(el));
 
+  // Build profileWithFullName once (used in passes 3, 4, 5)
+  const profileWithFullName = {
+    ...profile,
+    fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
+  };
+
+  // Pass 1 & 2: Exact and fuzzy keyword matching with per-field override support (item 18)
   for (const el of fields) {
     const profileKey = exactMatch(el) || fuzzyMatch(el);
     if (profileKey) {
-      const val = profileValue(profile, profileKey);
-      if (val && fillField(el, val)) {
-        if (!firstFilledEl) firstFilledEl = el;
-        filledCount++;
+      // Check per-field override first (item 18)
+      const overrideKey = `${hostname}::${profileKey}`;
+      const overrideVal = fieldOverrides[overrideKey];
+
+      // Typeahead detection (item 23)
+      const needsTypeahead = el.getAttribute('autocomplete') === 'street-address' ||
+        /company|university|school|location/i.test(getLabelText(el));
+
+      let val;
+      if (overrideVal !== undefined) {
+        val = overrideVal;
+      } else {
+        // Phone formatting (item 24) — apply when filling phone fields
+        if (profileKey === 'phone') {
+          const rawPhone = profileValue(profile, profileKey);
+          const formatted = formatPhone(rawPhone, el);
+          val = formatted || rawPhone;
+        } else {
+          val = profileValue(profile, profileKey);
+        }
+      }
+
+      if (val) {
+        let filled = false;
+        if (needsTypeahead) {
+          filled = await fillTypeahead(el, val);
+          if (!filled) filled = await fillField(el, val);
+        } else {
+          filled = await fillField(el, val);
+        }
+        if (filled) {
+          if (!firstFilledEl) firstFilledEl = el;
+          filledCount++;
+        }
       }
     } else {
       unmatched.push(el);
@@ -707,15 +879,8 @@ async function autofill() {
 
     let stillUnmatched = [...unmatched];
 
-    // Build once, reuse in both Pass 3 and Pass 4
-    const profileWithFullName = {
-      ...profile,
-      fullName: [profile.firstName, profile.lastName].filter(Boolean).join(' ')
-    };
-
     if (apiKey) {
       try {
-        // Notify popup that Pass 3 is starting
         chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-text' }).catch(() => {});
 
         const descriptors = unmatched.map(fieldDescriptor);
@@ -731,7 +896,7 @@ async function autofill() {
           for (const el of unmatched) {
             const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = response.mapping[key];
-            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) {
+            if (claudeVal && await applyClaudeValue(el, claudeVal, profile)) {
               if (!firstFilledEl) firstFilledEl = el;
               filledCount++;
             } else {
@@ -749,7 +914,6 @@ async function autofill() {
 
     if (stillUnmatched.length > 0 && apiKey) {
       try {
-        // Notify popup that Pass 4 is starting
         chrome.runtime.sendMessage({ action: 'fillProgress', stage: 'ai-vision' }).catch(() => {});
 
         const descriptors = stillUnmatched.map(fieldDescriptor).slice(0, 20);
@@ -759,11 +923,15 @@ async function autofill() {
           profile: profileWithFullName,
           pageContext: getPageContext(),
         });
-        if (visionResponse && visionResponse.mapping) {
+
+        // Vision pass provider skip (item 9)
+        if (visionResponse && visionResponse.skipped) {
+          apiError = apiError || visionResponse.reason;
+        } else if (visionResponse && visionResponse.mapping) {
           for (const el of stillUnmatched) {
             const key = el.id || el.name || el.dataset.__fillrIdx || '';
             const claudeVal = visionResponse.mapping[key];
-            if (claudeVal && applyClaudeValue(el, claudeVal, profile)) {
+            if (claudeVal && await applyClaudeValue(el, claudeVal, profile)) {
               if (!firstFilledEl) firstFilledEl = el;
               filledCount++;
             }
@@ -778,7 +946,6 @@ async function autofill() {
 
     unmatched.forEach(el => { delete el.dataset.__fillrIdx; });
   }
-
 
   // ── Pass 5: Custom dropdown fill ──────────────────────────────────────────
   try {
@@ -826,7 +993,8 @@ async function autofill() {
     if (el.type === 'checkbox') {
       current = el.checked ? 'checked' : 'unchecked';
     } else if (el.type === 'radio' && el.name) {
-      const group = document.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      const root = el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
+      const group = root.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
       current = Array.from(group).find(r => r.checked)?.value || '';
     } else {
       current = el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
@@ -835,12 +1003,30 @@ async function autofill() {
     if (current !== original) undoStack.push({ el, original });
   }
 
-  // Scroll once to the first filled field (not per-field — prevents jarring multi-scroll)
+  // Scroll once to the first filled field
   if (firstFilledEl) {
     firstFilledEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  return { filled: filledCount, apiError, hasUndo: undoStack.length > 0 };
+  // Cross-origin iframe warning
+  const iframeWarning = (window.__fillrCrossOriginFrames || 0) > 0
+    ? `${window.__fillrCrossOriginFrames} field(s) in embedded frames were skipped.`
+    : null;
+
+  // Send analytics to background
+  chrome.runtime.sendMessage({
+    action: 'saveFillAnalytics',
+    data: {
+      hostname,
+      totalFields: fields.length + unmatched.length,
+      filledFields: filledCount,
+      passBreakdown: {},
+      apiCallsMade: apiKey ? 1 : 0,
+      durationMs: 0
+    }
+  }).catch(() => {});
+
+  return { filled: filledCount, apiError, hasUndo: undoStack.length > 0, iframeWarning };
   } finally {
     isFilling = false;
   }
@@ -854,19 +1040,16 @@ function isVisibleEl(el) {
 }
 
 function findSubmitButton() {
-  // Prefer explicit submit buttons
   const explicit = Array.from(
     document.querySelectorAll('button[type=submit]:not(:disabled), input[type=submit]:not(:disabled)')
   ).find(isVisibleEl);
   if (explicit) return explicit;
 
-  // Fall back to keyword-matched buttons
   const keywords = /\b(register|sign\s*up|rsvp|submit|join|attend|confirm|continue|next)\b/i;
   return Array.from(document.querySelectorAll('button:not(:disabled), [role=button]'))
     .find(b => isVisibleEl(b) && keywords.test(b.textContent.trim())) || null;
 }
 
-// Pre-flight CAPTCHA detection
 function hasCaptcha() {
   return !!(
     document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]') ||
@@ -880,26 +1063,187 @@ function detectSignupSuccess() {
   return /you.?re (registered|going|in|all set)|registration confirmed|rsvp confirmed|see you there|you.?re registered/i.test(text);
 }
 
-// Multi-step fill+submit loop (handles Luma's email→name two-step flow).
-// Returns { submitted, confirmed, filled } or { captcha: true }.
+// Fields about teammates / referrals / collaborators — leave blank rather than filling N/A
+const NA_SKIP_PATTERNS = /team(?:mate)?|collaborat|partner|co.?founder|member|colleague|referr|invited?\s*by|who\s*told|recruit|sponsor|recomm/i;
+
+// Fields that look like open-ended essay/question prompts — need AI to generate a real answer
+const ESSAY_FIELD_PATTERNS = /what\s+(have|did|are|will|would|do)\s+you|what.*(built|made|created|working\s*on|project|ship|launch)|plan\s*to\s*(build|make|create|do|work)|tell\s*us\s*(about|why|what|how)|why\s+(do|are|want|would|should|you)|describe\s+(your|yourself|a|the|how|what)|how\s+(did|do|have|would)|background|experience.*goal|motivation|vision|pitch|idea|project\s*desc|goals\s+for|looking\s+to|apply\s+because|passionate\s+about|interest\s+in|why.*apply|about\s+yourself/i;
+
+// Call the AI to generate a compelling answer for an open-ended question field
+async function generateEssayAnswer(label, el) {
+  const options = el.tagName === 'SELECT'
+    ? Array.from(el.options).map(o => o.text.trim()).filter(t => t)
+    : [];
+  const pageContext = {
+    title: document.title,
+    url: location.href,
+    headings: Array.from(document.querySelectorAll('h1,h2')).slice(0, 3).map(h => h.textContent.trim())
+  };
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage(
+      { action: 'generateEssayAnswer', label, options, pageContext },
+      resp => resolve(resp?.answer || null)
+    );
+  });
+}
+
+// Fill any still-empty required fields before attempting submit.
+// Essay/question fields → AI generates a real answer.
+// Simple missing fields → "N/A".
+// Team/referral/collab fields → left blank for manual completion.
+async function fillEmptyRequiredWithNA() {
+  const required = Array.from(document.querySelectorAll(
+    'input[required], select[required], textarea[required], [aria-required="true"]'
+  )).filter(el => {
+    if (el.disabled || el.type === 'hidden' || el.type === 'checkbox' || el.type === 'radio') return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    return !el.value || !el.value.trim();
+  });
+
+  let naFilled = 0;
+  for (const el of required) {
+    const label = getLabelText(el) || el.placeholder || el.name || '';
+    if (NA_SKIP_PATTERNS.test(label)) continue; // leave blank for manual completion
+
+    // Essay/question fields — ask the AI for a real, compelling answer
+    const isEssay = el.tagName === 'TEXTAREA' || ESSAY_FIELD_PATTERNS.test(label);
+    if (isEssay) {
+      const aiAnswer = await generateEssayAnswer(label, el);
+      if (aiAnswer) {
+        await fillField(el, aiAnswer);
+        naFilled++;
+        continue;
+      }
+      // If AI call fails, fall through to N/A for SELECT, skip textarea
+      if (el.tagName === 'TEXTAREA') continue;
+    }
+
+    if (el.tagName === 'SELECT') {
+      const naOption = Array.from(el.options).find(o =>
+        /^(n\/?a|none|not applicable|prefer not|skip|other)$/i.test(o.text.trim())
+      );
+      if (naOption) {
+        el.value = naOption.value;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        naFilled++;
+      }
+      continue; // skip SELECT if no suitable option — don't pick a wrong value
+    }
+
+    await fillField(el, 'N/A');
+    naFilled++;
+  }
+  return naFilled;
+}
+
+// Returns labels of required fields that are still empty/unchecked after filling
+function getUnfilledRequiredFields() {
+  const required = Array.from(document.querySelectorAll(
+    'input[required], select[required], textarea[required], [aria-required="true"]'
+  ));
+  const unfilled = required.filter(el => {
+    if (el.disabled || el.type === 'hidden') return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.type === 'checkbox') return !el.checked;
+    return !el.value || !el.value.trim();
+  });
+  const labels = unfilled.map(el =>
+    getLabelText(el) || el.placeholder || el.name || el.id || 'unnamed field'
+  );
+  return [...new Set(labels)];
+}
+
+// True if the page still has a visible form after a submit attempt.
+// The most reliable signal that submission was rejected — works regardless
+// of whether the form uses native HTML5 validation, ARIA, or custom JS validation.
+function isFormStillVisible() {
+  const forms = Array.from(document.querySelectorAll('form, [role="form"]'));
+  return forms.some(f => {
+    const s = window.getComputedStyle(f);
+    if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+    // Must contain at least one visible input — rules out hidden honeypot forms
+    return !!f.querySelector('input:not([type=hidden]), textarea, select');
+  });
+}
+
+// After confirming the form is still visible, collect specific field-level error info
+// so the popup can show a useful message. Best-effort — falls back gracefully.
+function collectFieldErrors() {
+  const fields = [];
+
+  // 1. HTML5 native :invalid (works when form does NOT have noValidate)
+  Array.from(document.querySelectorAll(':invalid')).forEach(el => {
+    if (el.tagName === 'FORM' || el.tagName === 'FIELDSET' || el.disabled || el.type === 'hidden') return;
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    const label = getLabelText(el) || el.placeholder || el.name || el.id || 'a field';
+    const msg = el.validationMessage;
+    fields.push(msg && msg.length < 80 ? `${label} (${msg})` : label);
+  });
+
+  // 2. ARIA invalid — React Hook Form, Formik, etc.
+  Array.from(document.querySelectorAll('[aria-invalid="true"]')).forEach(el => {
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    fields.push(getLabelText(el) || el.placeholder || el.name || el.id || 'a field');
+  });
+
+  // 3. Required fields that are still empty
+  fields.push(...getUnfilledRequiredFields());
+
+  return [...new Set(fields)];
+}
+
+// Wait for new (previously unseen) fields to appear (item 3)
+function waitForNewFields(timeout) {
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, timeout);
+    const obs = new MutationObserver(debounce(() => {
+      const hasNew = document.querySelector('input:not([data-fillr-seen]), textarea:not([data-fillr-seen]), select:not([data-fillr-seen])');
+      if (hasNew) { clearTimeout(timer); obs.disconnect(); resolve(); }
+    }, 400));
+    obs.observe(document.body, { childList: true, subtree: true });
+    // Mark existing fields as seen
+    document.querySelectorAll('input, textarea, select, [contenteditable]').forEach(el => el.dataset.fillrSeen = '1');
+  });
+}
+
+// Multi-step fill+submit loop with MutationObserver support
 async function fillAndSubmit() {
   if (isFilling) return { error: 'Already filling' };
   if (hasCaptcha()) return { captcha: true };
 
+  const MAX_STEPS = 8;
+  const STEP_TIMEOUT_MS = 5000;
   let totalFilled = 0;
   let submitted = false;
+  let stepCount = 0;
 
-  for (let step = 0; step < 3; step++) {
+  while (stepCount < MAX_STEPS) {
     if (detectSignupSuccess()) { submitted = true; break; }
+
+    chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'filling', step: stepCount + 1 }).catch(() => {});
 
     const result = await autofill();
     totalFilled += result.filled;
 
-    // No new fields on step > 0 means the form isn't advancing
-    if (result.filled === 0 && step > 0) break;
+    // No progress on a subsequent step — nothing more to fill
+    if (result.filled === 0 && stepCount > 0) break;
 
-    // Wait for React to process fills
+    // Give React / framework time to process events before we inspect fields
     await new Promise(r => setTimeout(r, 600));
+
+    // Fill any still-empty required fields with N/A (skip team/referral questions)
+    await fillEmptyRequiredWithNA();
+    await new Promise(r => setTimeout(r, 300));
+
+    // Pre-submit check: required fields still empty after N/A pass
+    const unfilledRequired = getUnfilledRequiredFields();
+    if (unfilledRequired.length > 0) {
+      return { requiredUnfilled: unfilledRequired, filled: totalFilled };
+    }
 
     const btn = findSubmitButton();
     if (!btn) break;
@@ -907,18 +1251,61 @@ async function fillAndSubmit() {
     const urlBefore = location.href;
     btn.click();
     submitted = true;
+    stepCount++;
 
-    // Wait for the page to react
-    await new Promise(r => setTimeout(r, 3000));
+    // Wait for either new fields (multi-step wizard) or page transition
+    await waitForNewFields(STEP_TIMEOUT_MS);
 
-    // Secondary success signal: URL change post-submit
-    const urlChanged = location.href !== urlBefore;
-    if (urlChanged || detectSignupSuccess()) {
+    // ── Success: page navigated or success text appeared ──────────────────
+    if (location.href !== urlBefore || detectSignupSuccess()) {
       return { submitted: true, confirmed: true, filled: totalFilled };
     }
+
+    // Page didn't advance — give the DOM a moment to render error/loading states
+    await new Promise(r => setTimeout(r, 500));
+
+    // Check again after settling (covers slow SPAs that redirect after a short delay)
+    if (location.href !== urlBefore || detectSignupSuccess()) {
+      return { submitted: true, confirmed: true, filled: totalFilled };
+    }
+
+    // ── Primary failure check: is the form still on screen? ───────────────
+    // If yes, the submission was rejected — regardless of validation mechanism.
+    // This works even when the form uses noValidate + custom JS error classes.
+    if (isFormStillVisible()) {
+      const errorFields = collectFieldErrors();
+      const fields = errorFields.length > 0
+        ? errorFields
+        : ['Submission failed — check the form for highlighted errors'];
+      return { requiredUnfilled: fields, filled: totalFilled };
+    }
+
+    // Form is gone but no success text — likely email-verification flow
+    // (form submitted, confirmation will come via email)
+    break;
   }
 
   return { submitted, confirmed: detectSignupSuccess(), filled: totalFilled };
+}
+
+// ── In-page toast (item 17) ───────────────────────────────────────────────────
+function showPageToast(msg) {
+  let el = document.getElementById('__fillr-page-toast__');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '__fillr-page-toast__';
+    Object.assign(el.style, {
+      position: 'fixed', bottom: '20px', right: '20px', zIndex: '2147483646',
+      background: '#161616', color: '#C9A96E', border: '1px solid #C9A96E',
+      borderRadius: '8px', padding: '8px 16px', fontFamily: 'system-ui, sans-serif',
+      fontSize: '13px', fontWeight: '500', transition: 'opacity 0.3s', opacity: '0'
+    });
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  clearTimeout(el.__timer);
+  el.__timer = setTimeout(() => { el.style.opacity = '0'; }, 3000);
 }
 
 // ── Floating button ───────────────────────────────────────────────────────────
@@ -954,7 +1341,7 @@ function createFloatingButton() {
         } else {
           btn.innerHTML = 'Autofill';
         }
-      } catch (e) {
+      } catch {
         btn.innerHTML = 'Autofill';
       } finally {
         delete btn.dataset.filling;
@@ -974,7 +1361,8 @@ chrome.storage.local.get('floatingBtn', ({ floatingBtn }) => {
   if (floatingBtn) createFloatingButton();
 });
 
-// MutationObserver: re-show/hide floating button on SPA navigation
+// MutationObserver: re-show/hide floating button on SPA navigation (item 15)
+// Narrowed scope: top-level only for body, plus specific form containers
 let _spaDebounce = null;
 const spaObserver = new MutationObserver(() => {
   clearTimeout(_spaDebounce);
@@ -986,13 +1374,20 @@ const spaObserver = new MutationObserver(() => {
       if (hasForm && !btn) createFloatingButton();
       else if (!hasForm && btn) btn.remove();
     });
-  }, 300);
+  }, 500); // Increased from 300ms to 500ms
 });
-spaObserver.observe(document.body, { childList: true, subtree: true });
 
-// Disconnect observer on page unload to prevent memory leak
+// Observe body top-level only, then targeted containers
+spaObserver.observe(document.body, { childList: true, subtree: false });
+['main', '[role="main"]', 'form'].forEach(sel => {
+  const el = document.querySelector(sel);
+  if (el) spaObserver.observe(el, { childList: true, subtree: true });
+});
+
+// Disconnect observers on page unload to prevent memory leak
 window.addEventListener('beforeunload', () => {
   spaObserver.disconnect();
+  labelCacheObserver.disconnect();
   clearTimeout(_spaDebounce);
 });
 
@@ -1010,11 +1405,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.action === 'undoFill') {
     let restored = 0;
-    for (const { el, original } of undoStack) {
-      if (fillField(el, original)) restored++;
-    }
-    undoStack = [];
-    sendResponse({ restored });
+    const promises = undoStack.map(({ el, original }) =>
+      fillField(el, original).then(r => { if (r) restored++; })
+    );
+    Promise.all(promises).then(() => {
+      undoStack = [];
+      sendResponse({ restored });
+    });
     return true;
   }
 
@@ -1032,6 +1429,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     fillAndSubmit().then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
+
+  // In-page toast from keyboard shortcut handler (item 17)
+  if (message.action === 'showPageToast') {
+    showPageToast(message.msg);
+  }
 });
-
-
