@@ -946,6 +946,36 @@ input:focus-visible + .toggle-slider {
   cursor: help;
 }
 
+/* ── Fill preview highlight classes (item 19) ─────────────────────────────── */
+.autofill-preview {
+  outline: 2px solid #3B82F6 !important;
+  background: rgba(59,130,246,0.08) !important;
+  transition: outline 0.3s, background 0.3s;
+}
+.autofill-preview-ai {
+  outline: 1px solid #EF4444 !important;
+  background: rgba(239,68,68,0.06) !important;
+  transition: outline 0.3s, background 0.3s;
+}
+
+/* ── Settings row ──────────────────────────────────────────────────────────── */
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-input);
+}
+.settings-label {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
 /* ── Light mode ────────────────────────────────────────────────────────────── */
 @media (prefers-color-scheme: light) {
   :root {

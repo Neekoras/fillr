@@ -19,6 +19,10 @@ const CORE_PROFILE_KEYS = [
   'linkedin', 'github', 'website', 'twitter', 'instagram'
 ];
 
+// ── Auto-save skip if unchanged ───────────────────────────────────────────────
+let lastSaved = {};
+let lastFillResult = null;
+
 // ── Multi-profile state ───────────────────────────────────────────────────────
 let profiles = [];
 let activeProfile = 0;
@@ -41,6 +45,8 @@ function loadProfileIntoForm(profile) {
     if (el) el.value = profile[key] || '';
   });
   updateCompleteness();
+  // Update lastSaved to current form state
+  PROFILE_KEYS.forEach(k => { const el = document.getElementById(k); if (el) lastSaved[k] = el.value.trim(); });
 }
 
 function readFormIntoProfile() {
@@ -99,7 +105,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     });
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
     document.getElementById(`tab-${target}`).classList.add('active');
-    if (target === 'settings') renderFillStats();
+    if (target === 'settings') { renderFillStats(); renderAiUsage(); updateReplayButton(); }
   });
 });
 
@@ -232,7 +238,7 @@ function renderFillStats() {
 }
 
 // ── Load stored values on popup open ─────────────────────────────────────────
-chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKey', 'aiProvider', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'siteAssignments', 'signupHistory', 'fieldOverrides'], data => {
+chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKey', 'aiProvider', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'siteAssignments', 'signupHistory', 'fieldOverrides', 'recordMode', 'formRecordings'], data => {
   if (data.profiles && data.profiles.length > 0) {
     profiles = data.profiles;
     activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
@@ -244,7 +250,15 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKe
   }
 
   siteAssignments = data.siteAssignments || {};
-  signupHistory = data.signupHistory || [];
+  // Handle both old array format and new object format
+  const rawHistory = data.signupHistory;
+  if (Array.isArray(rawHistory)) {
+    signupHistory = rawHistory;
+  } else if (rawHistory && typeof rawHistory === 'object') {
+    signupHistory = rawHistory;
+  } else {
+    signupHistory = [];
+  }
 
   populateProfileSelect();
   loadProfileIntoForm(profiles[activeProfile]);
@@ -353,6 +367,15 @@ function showOverrideEditor(fieldId, hostname, fieldOverrides) {
   saveBtn.addEventListener('click', () => {
     const val = input.value.trim();
     if (val) {
+      // Validate: field must be a known profile key
+      if (!CORE_PROFILE_KEYS.includes(fieldId)) {
+        showToast(`"${fieldId}" is not a valid profile field`, true);
+        return;
+      }
+      if (typeof val !== 'string' || val.length > 500) {
+        showToast('Override value must be a non-empty string under 500 chars', true);
+        return;
+      }
       fieldOverrides[overrideKey] = val;
     } else {
       delete fieldOverrides[overrideKey];
@@ -505,7 +528,10 @@ document.getElementById('saveDetails').addEventListener('click', () => {
   clearTimeout(autoSaveTimer);
   readFormIntoProfile();
   if (yearsExpVal !== '') profiles[activeProfile].yearsExp = isNaN(exp) ? '' : String(exp);
-  saveProfiles(() => showToast('Details saved'));
+  saveProfiles(() => {
+    PROFILE_KEYS.forEach(k => { const el = document.getElementById(k); if (el) lastSaved[k] = el.value.trim(); });
+    showToast('Details saved');
+  });
 });
 
 // ── AI Provider toggle ────────────────────────────────────────────────────────
@@ -769,13 +795,36 @@ function renderSignupHistory(history) {
   const section = document.getElementById('signupHistorySection');
   const list = document.getElementById('signupHistory');
   if (!section || !list) return;
-  if (!history || history.length === 0) {
+
+  // Normalize: both array and object formats
+  let entries = [];
+  if (Array.isArray(history)) {
+    entries = history; // legacy flat array
+  } else if (history && typeof history === 'object') {
+    // Group by hostname
+    for (const [hostname, items] of Object.entries(history)) {
+      if (!Array.isArray(items)) continue;
+      entries.push({ _isHeader: true, hostname });
+      items.forEach(e => entries.push(e));
+    }
+  }
+
+  if (!entries.length || (entries.length === 0)) {
     section.style.display = 'none';
     return;
   }
   section.style.display = 'block';
   list.innerHTML = '';
-  history.forEach(({ url, timestamp, status, filled }) => {
+
+  entries.forEach(entry => {
+    if (entry._isHeader) {
+      const header = document.createElement('div');
+      header.style.cssText = 'font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.05em;text-transform:uppercase;padding:4px 0 2px;margin-top:4px;border-top:1px solid var(--border)';
+      header.textContent = entry.hostname;
+      list.appendChild(header);
+      return;
+    }
+    const { url, timestamp, status, filled } = entry;
     const row = document.createElement('div');
     row.className = 'history-row';
 
@@ -801,14 +850,49 @@ function renderSignupHistory(history) {
 
 function addToSignupHistory(rawUrl, status, filled) {
   let displayUrl = rawUrl;
+  let hostname = '';
   try {
     const u = new URL(rawUrl);
-    displayUrl = u.hostname.replace(/^www\./, '') + u.pathname.replace(/\/$/, '');
+    hostname = u.hostname.replace(/^www\./, '');
+    displayUrl = hostname + u.pathname.replace(/\/$/, '');
   } catch {}
-  signupHistory.unshift({ url: displayUrl, timestamp: Date.now(), status, filled });
-  if (signupHistory.length > 20) signupHistory.splice(20);
-  chrome.storage.local.set({ signupHistory });
-  renderSignupHistory(signupHistory);
+
+  chrome.storage.local.get('signupHistory', data => {
+    let history = data.signupHistory || {};
+    // Migrate legacy array format
+    if (Array.isArray(history)) {
+      const migrated = {};
+      history.forEach(e => {
+        const h = e.url ? (e.url.split('/')[0] || 'unknown') : 'unknown';
+        if (!migrated[h]) migrated[h] = [];
+        migrated[h].push(e);
+      });
+      history = migrated;
+    }
+    const key = hostname || 'unknown';
+    if (!history[key]) history[key] = [];
+    history[key].unshift({ url: displayUrl, timestamp: Date.now(), status, filled });
+    if (history[key].length > 10) history[key].splice(10);
+    // Cap total entries at 50
+    let total = Object.values(history).reduce((s, a) => s + a.length, 0);
+    if (total > 50) {
+      const keys = Object.keys(history).sort((a, b) => {
+        const aOld = history[a][history[a].length - 1]?.timestamp || 0;
+        const bOld = history[b][history[b].length - 1]?.timestamp || 0;
+        return aOld - bOld;
+      });
+      outer: for (const k of keys) {
+        while (history[k].length > 0 && total > 50) {
+          history[k].pop(); total--;
+        }
+        if (history[k].length === 0) delete history[k];
+        if (total <= 50) break outer;
+      }
+    }
+    signupHistory = history;
+    chrome.storage.local.set({ signupHistory: history });
+    renderSignupHistory(history);
+  });
 }
 
 document.getElementById('clearHistory')?.addEventListener('click', () => {
@@ -958,6 +1042,10 @@ function triggerFill() {
       }
       if (!response || response.filled === undefined) return;
 
+      // Track fill result for resume button
+      lastFillResult = { hostname: currentHostname, filled: response.filled, total: response.totalFields || 0 };
+      updateResumeButton();
+
       if (response.blocked) {
         showToast('This site is blocked — remove it in Settings', true);
       } else if (response.iframeWarning) {
@@ -965,7 +1053,8 @@ function triggerFill() {
         showToast(response.iframeWarning);
         if (response.apiError) showToast(response.apiError, true);
         else if (response.filled > 0) {
-          const msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
+          let msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
+          if (response.confidence !== undefined) msg = msg + ` (${response.confidence}%)`;
           if (response.hasUndo && lastFillTabId) {
             showToastWithUndo(msg, () => {
               chrome.tabs.sendMessage(lastFillTabId, { action: 'undoFill' })
@@ -981,7 +1070,8 @@ function triggerFill() {
       } else if (response.filled === 0) {
         showToast('No fillable fields found');
       } else {
-        const msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
+        let msg = `Filled ${response.filled} field${response.filled !== 1 ? 's' : ''}`;
+        if (response.confidence !== undefined) msg = msg + ` (${response.confidence}%)`;
         if (response.hasUndo && lastFillTabId) {
           showToastWithUndo(msg, () => {
             chrome.tabs.sendMessage(lastFillTabId, { action: 'undoFill' })
@@ -1013,8 +1103,11 @@ function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   showSaveIndicator('saving');
   autoSaveTimer = setTimeout(() => {
+    const current = {};
+    PROFILE_KEYS.forEach(k => { const el = document.getElementById(k); if (el) current[k] = el.value.trim(); });
+    if (PROFILE_KEYS.every(k => (current[k] || '') === (lastSaved[k] || ''))) return; // nothing changed
     readFormIntoProfile();
-    saveProfiles(() => showSaveIndicator('saved'));
+    saveProfiles(() => { lastSaved = { ...current }; showSaveIndicator('saved'); });
   }, 800);
   // Update completeness indicator with debounce
   clearTimeout(_completenessDebounce);
@@ -1047,4 +1140,115 @@ document.addEventListener('keydown', e => {
     if (activeTab === 'details') document.getElementById('saveDetails').click();
     else if (activeTab === 'settings') document.getElementById('saveApiKey').click();
   }
+});
+
+// ── Preview fill button ───────────────────────────────────────────────────────
+document.getElementById('previewFill')?.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (!tabs[0]) return;
+    chrome.tabs.sendMessage(tabs[0].id, { action: 'preview' }, response => {
+      if (chrome.runtime.lastError || !response || !response.preview) return;
+      const panel = document.getElementById('previewPanel');
+      const table = document.getElementById('previewTable');
+      if (!panel || !table) return;
+      panel.style.display = 'block';
+      table.innerHTML = `
+        <p class="hint" style="margin-bottom:4px">P1/P2: ${response.matchedCount} matched · AI required: ${response.unmatchedCount}</p>
+        <div style="max-height:160px;overflow-y:auto">
+          ${response.preview.map(r => `
+            <div style="display:flex;gap:6px;align-items:baseline;padding:2px 0;font-size:11px;font-family:var(--font-mono)">
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)" title="${r.label}">${r.label}</span>
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${r.value ? 'var(--text-primary)' : 'var(--error)'}">${r.value || 'AI required'}</span>
+              <span style="min-width:60px;text-align:right;color:var(--text-muted)">${r.pass}</span>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    });
+  });
+});
+
+// ── Resume fill button ────────────────────────────────────────────────────────
+function updateResumeButton() {
+  const btn = document.getElementById('resumeFill');
+  if (!btn) return;
+  const show = lastFillResult && lastFillResult.hostname === currentHostname
+    && lastFillResult.filled > 0 && lastFillResult.total > 0
+    && lastFillResult.filled < lastFillResult.total;
+  btn.style.display = show ? '' : 'none';
+}
+
+document.getElementById('resumeFill')?.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (!tabs[0]) return;
+    chrome.tabs.sendMessage(tabs[0].id, { action: 'fill', skipFilled: true, passesStart: 3 }, response => {
+      if (!response) return;
+      showToast(response.filled > 0 ? `Resumed: ${response.filled} more field${response.filled !== 1 ? 's' : ''} filled` : 'No remaining fields to fill');
+    });
+  });
+});
+
+// ── Record mode toggle ────────────────────────────────────────────────────────
+document.getElementById('recordMode')?.addEventListener('change', e => {
+  const enabled = e.target.checked;
+  chrome.storage.local.set({ recordMode: enabled });
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, { action: 'setRecordMode', enabled }).catch(() => {});
+  });
+  updateReplayButton();
+});
+
+document.getElementById('replayRecording')?.addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (!tabs[0]) return;
+    chrome.tabs.sendMessage(tabs[0].id, { action: 'replayRecording' }, response => {
+      if (!response || !response.filled) { showToast('No recording found for this site', true); return; }
+      showToast(`Replayed: ${response.filled} field${response.filled !== 1 ? 's' : ''} filled`);
+    });
+  });
+});
+
+function updateReplayButton() {
+  const btn = document.getElementById('replayRecording');
+  if (!btn) return;
+  chrome.storage.local.get(['formRecordings', 'recordMode'], data => {
+    const hasRecording = data.formRecordings && data.formRecordings[currentHostname];
+    btn.style.display = (data.recordMode && hasRecording) ? '' : 'none';
+    const rm = document.getElementById('recordMode');
+    if (rm) rm.checked = !!data.recordMode;
+  });
+}
+
+// ── AI Usage section ──────────────────────────────────────────────────────────
+function renderAiUsage() {
+  const el = document.getElementById('aiUsageContent');
+  if (!el) return;
+  chrome.storage.session.get('aiUsage', data => {
+    const usage = data.aiUsage;
+    if (!usage || (!usage.inputTokens && !usage.outputTokens)) {
+      el.innerHTML = '<p class="hint">No API calls this session.</p>';
+      return;
+    }
+    const cost = (usage.totalCost || 0).toFixed(4);
+    const calls = Object.entries(usage.calls || {}).map(([k, v]) => `${k}: ${v}`).join(' · ') || '0';
+    el.innerHTML = `
+      <p class="hint">Calls: <strong style="color:var(--text-primary)">${calls}</strong></p>
+      <p class="hint">Input tokens: <strong style="color:var(--text-primary)">${(usage.inputTokens || 0).toLocaleString()}</strong> · Output: <strong style="color:var(--text-primary)">${(usage.outputTokens || 0).toLocaleString()}</strong></p>
+      <p class="hint">Est. cost: <strong style="color:var(--gold)">$${cost}</strong></p>
+    `;
+  });
+}
+
+document.getElementById('aiUsageToggle')?.addEventListener('click', () => {
+  const section = document.getElementById('aiUsageSection');
+  if (!section) return;
+  const open = section.style.display === 'none' || !section.style.display;
+  section.style.display = open ? 'block' : 'none';
+  document.getElementById('aiUsageToggle').textContent = `AI Usage This Session ${open ? '▾' : '▸'}`;
+  if (open) renderAiUsage();
+});
+
+// ── Keyboard shortcut change button ──────────────────────────────────────────
+document.getElementById('changeShortcut')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
 });

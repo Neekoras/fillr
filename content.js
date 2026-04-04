@@ -16,6 +16,16 @@
       background: rgba(239,68,68,0.08) !important;
       transition: outline 0.3s, background 0.3s;
     }
+    .autofill-preview {
+      outline: 2px solid #3B82F6 !important;
+      background: rgba(59,130,246,0.08) !important;
+      transition: outline 0.3s, background 0.3s;
+    }
+    .autofill-preview-ai {
+      outline: 1px solid #EF4444 !important;
+      background: rgba(239,68,68,0.06) !important;
+      transition: outline 0.3s, background 0.3s;
+    }
     #__autofill-float-btn__ {
       position: fixed;
       bottom: 20px;
@@ -199,8 +209,15 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-// ── Label text cache (WeakMap + attribute flag for SPA invalidation) ──────────
-const labelCache = new WeakMap();
+// ── collectFields result cache — rebuilt on DOM mutation, served directly between mutations
+let _fieldsCache = null;
+let _fieldsCacheValid = false;
+let _fieldsCacheFillAll = false;
+
+// Tracks fields filled in this page session — used by skipFilled mode
+const _filledThisSession = new WeakSet();
+
+// ── Label text cache (dataset attribute for SPA invalidation) ─────────────
 
 // ── Recursive shadow DOM field collection (item 1) ────────────────────────────
 function collectShadowFields(root, depth = 0, maxDepth = 4) {
@@ -213,33 +230,28 @@ function collectShadowFields(root, depth = 0, maxDepth = 4) {
 }
 
 // ── Collect visible, fillable fields ─────────────────────────────────────────
-function collectFields(fillAll = false) {
+function collectFields(fillAll = false, skipFilled = false) {
+  if (_fieldsCacheValid && _fieldsCacheFillAll === fillAll && !skipFilled) {
+    return _fieldsCache;
+  }
   const main = Array.from(document.querySelectorAll(FIELD_SELECTOR));
-
-  // Recursive shadow DOM support (item 1)
   const shadow = collectShadowFields(document, 0, 4);
   const all = [...main, ...shadow];
 
-  // Same-origin iframe field inclusion (item 2)
   let crossOriginFrameCount = 0;
   for (const frame of document.querySelectorAll('iframe')) {
     try {
       const doc = frame.contentDocument;
-      if (doc) {
-        Array.from(doc.querySelectorAll(FIELD_SELECTOR)).forEach(f => all.push(f));
-      }
-    } catch {
-      crossOriginFrameCount++;
-    }
+      if (doc) Array.from(doc.querySelectorAll(FIELD_SELECTOR)).forEach(f => all.push(f));
+    } catch { crossOriginFrameCount++; }
   }
-  if (crossOriginFrameCount > 0) {
-    window.__fillrCrossOriginFrames = crossOriginFrameCount;
-  }
+  if (crossOriginFrameCount > 0) window.__fillrCrossOriginFrames = crossOriginFrameCount;
 
   const filtered = all.filter(el => {
     if (el.disabled || el.readOnly) return false;
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    if (skipFilled && _filledThisSession.has(el)) return false;
     if (el.type === 'checkbox') return !el.checked;
     if (el.type === 'radio') {
       if (!el.name) return false;
@@ -248,27 +260,31 @@ function collectFields(fillAll = false) {
       return group[0] === el;
     }
     const currentVal = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'
-      ? el.value
-      : el.textContent;
+      ? el.value : el.textContent;
     if (stripInvisible(currentVal) !== '') return false;
     return true;
   });
 
-  // fillAll=false: prefer fields inside a <form> over orphan inputs (item 22)
+  let result = filtered;
   if (!fillAll) {
     const inForm = filtered.filter(el => el.closest('form'));
-    if (inForm.length > 0) return inForm;
+    if (inForm.length > 0) result = inForm;
   }
 
-  return filtered;
+  if (!skipFilled) {
+    _fieldsCache = result;
+    _fieldsCacheValid = true;
+    _fieldsCacheFillAll = fillAll;
+  }
+  return result;
 }
 
 // ── Get a label text for a field ─────────────────────────────────────────────
 const INPUT_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
 
 function getLabelText(el) {
-  // Use attribute flag for SPA-safe cache invalidation (item 5)
-  if (el.dataset && el.dataset.fillrLabelCached !== undefined) return labelCache.get(el) || '';
+  // Use dataset attribute for SPA-safe cache invalidation
+  if (el.dataset && 'fillrLabel' in el.dataset) return el.dataset.fillrLabel;
 
   let result = '';
 
@@ -331,17 +347,16 @@ function getLabelText(el) {
     }
   }
 
-  // Store with attribute flag for SPA invalidation
-  if (el.dataset) el.dataset.fillrLabelCached = '';
-  labelCache.set(el, result);
+  // Store directly in dataset for SPA invalidation
+  if (el.dataset) el.dataset.fillrLabel = result;
   return result;
 }
 
-// MutationObserver to clear stale label cache on SPA navigation (item 5)
+// MutationObserver to clear stale label cache on SPA navigation
 const labelCacheObserver = new MutationObserver(debounce(() => {
-  document.querySelectorAll('[data-fillr-label-cached]').forEach(el => {
-    delete el.dataset.fillrLabelCached;
-    labelCache.delete(el);
+  _fieldsCacheValid = false; // invalidate fields cache on DOM mutation
+  document.querySelectorAll('[data-fillr-label]').forEach(el => {
+    delete el.dataset.fillrLabel;
   });
 }, 200));
 labelCacheObserver.observe(document.body, { childList: true, subtree: true });
@@ -504,6 +519,7 @@ async function fillField(el, value) {
 
   el.classList.add('autofill-highlight');
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
+  _filledThisSession.add(el);
   return true;
 }
 
@@ -683,9 +699,25 @@ async function fillTypeahead(el, value) {
     el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
     await new Promise(r => setTimeout(r, 30));
   }
-  // Wait for dropdown to render
-  await new Promise(r => setTimeout(r, 800));
-  // Find and click best match option
+  // Race MutationObserver (dropdown appeared) against 600ms timeout
+  const label = getLabelText(el);
+  const appeared = await new Promise(resolve => {
+    const watchTarget = document.querySelector('[role="listbox"]') || el.closest('[class*="autocomplete"]') || document.body;
+    let settled = false;
+    const obs = new MutationObserver(() => {
+      if (settled) return;
+      const opts = document.querySelectorAll('[role="option"], [role="listitem"], .autocomplete-suggestion');
+      if (opts.length > 0) { settled = true; obs.disconnect(); clearTimeout(timer); resolve(true); }
+    });
+    obs.observe(watchTarget, { childList: true, subtree: true });
+    const timer = setTimeout(() => { if (!settled) { settled = true; obs.disconnect(); resolve(false); } }, 600);
+  });
+
+  if (!appeared) {
+    console.warn(`[Fillr] typeahead: no dropdown appeared for "${label}"`);
+    return false;
+  }
+
   const options = document.querySelectorAll('[role="option"], [role="listitem"], .autocomplete-suggestion');
   const lower = value.toLowerCase();
   const match = Array.from(options).find(o => o.textContent.trim().toLowerCase().startsWith(lower))
@@ -763,7 +795,7 @@ let undoStack = [];
 let isFilling = false;
 
 // ── Main autofill function ────────────────────────────────────────────────────
-async function autofill() {
+async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
   if (isFilling) return { filled: 0 };
   isFilling = true;
   try {
@@ -799,10 +831,12 @@ async function autofill() {
   // Cross-origin iframe tracking reset
   window.__fillrCrossOriginFrames = 0;
 
-  const fields = collectFields(fillAll);
+  const fields = collectFields(fillAll, skipFilled);
   let filledCount = 0;
   let firstFilledEl = null;
   const unmatched = [];
+  let p1p2Count = 0, p3Count = 0, p4Count = 0, p5Count = 0, errorCount = 0;
+  const filledEntries = [];
 
   // Snapshot original values for undo (before any fills) — use defaultValue for pre-filled detection (item 10)
   const originalValues = new Map();
@@ -829,47 +863,55 @@ async function autofill() {
   };
 
   // Pass 1 & 2: Exact and fuzzy keyword matching with per-field override support (item 18)
-  for (const el of fields) {
-    const profileKey = exactMatch(el) || fuzzyMatch(el);
-    if (profileKey) {
-      // Check per-field override first (item 18)
-      const overrideKey = `${hostname}::${profileKey}`;
-      const overrideVal = fieldOverrides[overrideKey];
+  // Skip if passesStart >= 3 (resume mode)
+  if (passesStart < 3) {
+    for (const el of fields) {
+      const profileKey = exactMatch(el) || fuzzyMatch(el);
+      if (profileKey) {
+        // Check per-field override first (item 18)
+        const overrideKey = `${hostname}::${profileKey}`;
+        const overrideVal = fieldOverrides[overrideKey];
 
-      // Typeahead detection (item 23)
-      const needsTypeahead = el.getAttribute('autocomplete') === 'street-address' ||
-        /company|university|school|location/i.test(getLabelText(el));
+        // Typeahead detection (item 23)
+        const needsTypeahead = el.getAttribute('autocomplete') === 'street-address' ||
+          /company|university|school|location/i.test(getLabelText(el));
 
-      let val;
-      if (overrideVal !== undefined) {
-        val = overrideVal;
+        let val;
+        if (overrideVal !== undefined) {
+          val = overrideVal;
+        } else {
+          // Phone formatting (item 24) — apply when filling phone fields
+          if (profileKey === 'phone') {
+            const rawPhone = profileValue(profile, profileKey);
+            const formatted = formatPhone(rawPhone, el);
+            val = formatted || rawPhone;
+          } else {
+            val = profileValue(profile, profileKey);
+          }
+        }
+
+        if (val) {
+          let filled = false;
+          if (needsTypeahead) {
+            filled = await fillTypeahead(el, val);
+            if (!filled) filled = await fillField(el, val);
+          } else {
+            filled = await fillField(el, val);
+          }
+          if (filled) {
+            if (!firstFilledEl) firstFilledEl = el;
+            filledCount++;
+            p1p2Count++;
+            filledEntries.push({ el, profileKey });
+          }
+        }
       } else {
-        // Phone formatting (item 24) — apply when filling phone fields
-        if (profileKey === 'phone') {
-          const rawPhone = profileValue(profile, profileKey);
-          const formatted = formatPhone(rawPhone, el);
-          val = formatted || rawPhone;
-        } else {
-          val = profileValue(profile, profileKey);
-        }
+        unmatched.push(el);
       }
-
-      if (val) {
-        let filled = false;
-        if (needsTypeahead) {
-          filled = await fillTypeahead(el, val);
-          if (!filled) filled = await fillField(el, val);
-        } else {
-          filled = await fillField(el, val);
-        }
-        if (filled) {
-          if (!firstFilledEl) firstFilledEl = el;
-          filledCount++;
-        }
-      }
-    } else {
-      unmatched.push(el);
     }
+  } else {
+    // passesStart >= 3: skip P1/P2, treat all fields as unmatched
+    fields.forEach(el => unmatched.push(el));
   }
 
   if (unmatched.length > 0) {
@@ -899,6 +941,7 @@ async function autofill() {
             if (claudeVal && await applyClaudeValue(el, claudeVal, profile)) {
               if (!firstFilledEl) firstFilledEl = el;
               filledCount++;
+              p3Count++;
             } else {
               stillUnmatched.push(el);
             }
@@ -934,6 +977,7 @@ async function autofill() {
             if (claudeVal && await applyClaudeValue(el, claudeVal, profile)) {
               if (!firstFilledEl) firstFilledEl = el;
               filledCount++;
+              p4Count++;
             }
           }
         } else if (visionResponse && visionResponse.error) {
@@ -975,6 +1019,7 @@ async function autofill() {
             const val = customResponse.mapping[idx];
             if (val && await fillCustomDropdown(cEl, val)) {
               filledCount++;
+              p5Count++;
               if (!firstFilledEl) firstFilledEl = cEl;
             }
             delete cEl.dataset.__fillrCustomIdx;
@@ -985,6 +1030,9 @@ async function autofill() {
   } catch (e) {
     console.warn('[Autofill] Pass 5 (custom dropdowns) failed:', e);
   }
+
+  // Resolve confirm fields after P1/P2
+  const conflictSummary = await resolveConfirmFields(filledEntries);
 
   // Build undo stack — only fields whose value actually changed
   undoStack = [];
@@ -1026,10 +1074,95 @@ async function autofill() {
     }
   }).catch(() => {});
 
-  return { filled: filledCount, apiError, hasUndo: undoStack.length > 0, iframeWarning };
+  const confidence = computeConfidence(filledCount, fields.length, p1p2Count, p3Count, p4Count, p5Count, errorCount > 0);
+  return { filled: filledCount, apiError, hasUndo: undoStack.length > 0, iframeWarning, confidence, passBreakdown: { p1p2: p1p2Count, p3: p3Count, p4: p4Count, p5: p5Count }, conflictSummary };
   } finally {
     isFilling = false;
   }
+}
+
+// ── Fill confidence score ──────────────────────────────────────────────────
+function computeConfidence(filledCount, totalFields, p1p2Count, p3Count, p4Count, p5Count, hasErrors) {
+  if (totalFields === 0) return 0;
+  const filled = filledCount;
+  if (filled === 0) return 0;
+  const passScore = p1p2Count * 100 + p3Count * 75 + p4Count * 60 + p5Count * 80;
+  const passTotal = p1p2Count + p3Count + p4Count + p5Count;
+  const avgPassScore = passTotal > 0 ? passScore / passTotal : 75;
+  const score = Math.round((filled / totalFields) * avgPassScore * (hasErrors ? 0.8 : 1));
+  return Math.min(100, Math.max(0, score));
+}
+
+// ── Conflict resolution for duplicate profile matches ─────────────────────
+async function resolveConfirmFields(filledEntries) {
+  // Group by profile key
+  const byKey = {};
+  for (const { el, profileKey } of filledEntries) {
+    if (!byKey[profileKey]) byKey[profileKey] = [];
+    byKey[profileKey].push(el);
+  }
+
+  const summary = [];
+  for (const [key, els] of Object.entries(byKey)) {
+    if (els.length < 2) continue;
+    for (let i = 0; i < els.length - 1; i++) {
+      const r1 = els[i].getBoundingClientRect();
+      const r2 = els[i + 1].getBoundingClientRect();
+      if (Math.abs(r2.top - r1.top) > 200) continue;
+      const label2 = getLabelText(els[i + 1]).toLowerCase();
+      const isConfirm = /confirm|verify|repeat|re.?enter/.test(label2);
+      if (isConfirm && els[i].value) {
+        await fillField(els[i + 1], els[i].value);
+        summary.push(`${key}: confirm field matched`);
+      }
+    }
+  }
+  return summary;
+}
+
+// ── Preview fill ───────────────────────────────────────────────────────────
+async function previewFill() {
+  const storageData = await new Promise(resolve =>
+    chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'fieldOverrides', 'fillAll'], resolve)
+  );
+  const hostname = location.hostname.toLowerCase();
+  let profileData;
+  const profiles = storageData.profiles;
+  if (profiles && profiles.length > 0) {
+    const siteAssignments = storageData.siteAssignments || {};
+    let activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
+    if (siteAssignments[hostname] !== undefined) activeIdx = Math.min(siteAssignments[hostname], profiles.length - 1);
+    profileData = profiles[activeIdx];
+  } else { profileData = storageData; }
+  const profile = getProfile(profileData || {});
+  const fieldOverrides = storageData.fieldOverrides || {};
+  const fillAll = !!storageData.fillAll;
+
+  const fields = collectFields(fillAll);
+  const results = [];
+
+  for (const el of fields) {
+    const profileKey = exactMatch(el) || fuzzyMatch(el);
+    const label = getLabelText(el) || el.placeholder || el.name || el.id || 'Field';
+    if (profileKey) {
+      const overrideKey = `${hostname}::${profileKey}`;
+      const overrideVal = fieldOverrides[overrideKey];
+      const val = overrideVal !== undefined ? overrideVal : profileValue(profile, profileKey);
+      el.classList.add('autofill-preview');
+      setTimeout(() => el.classList.remove('autofill-preview'), 5000);
+      results.push({ label, value: val || '(empty in profile)', pass: overrideVal !== undefined ? 'Override' : 'P1/P2' });
+    } else {
+      el.classList.add('autofill-preview-ai');
+      setTimeout(() => el.classList.remove('autofill-preview-ai'), 5000);
+      results.push({ label, value: null, pass: 'AI required' });
+    }
+  }
+
+  return {
+    preview: results,
+    matchedCount: results.filter(r => r.value !== null).length,
+    unmatchedCount: results.filter(r => r.value === null).length
+  };
 }
 
 // ── Quick signup helpers ──────────────────────────────────────────────────────
@@ -1196,17 +1329,31 @@ function collectFieldErrors() {
   return [...new Set(fields)];
 }
 
-// Wait for new (previously unseen) fields to appear (item 3)
+// Wait for new (previously unseen) fields to appear
 function waitForNewFields(timeout) {
   return new Promise(resolve => {
     const timer = setTimeout(resolve, timeout);
-    const obs = new MutationObserver(debounce(() => {
-      const hasNew = document.querySelector('input:not([data-fillr-seen]), textarea:not([data-fillr-seen]), select:not([data-fillr-seen])');
-      if (hasNew) { clearTimeout(timer); obs.disconnect(); resolve(); }
-    }, 400));
-    obs.observe(document.body, { childList: true, subtree: true });
-    // Mark existing fields as seen
     document.querySelectorAll('input, textarea, select, [contenteditable]').forEach(el => el.dataset.fillrSeen = '1');
+
+    const FIELD_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
+    const callback = debounce((mutations) => {
+      const hasNew = mutations.some(m =>
+        Array.from(m.addedNodes).some(n => {
+          if (n.nodeType !== 1) return false;
+          if (FIELD_TAGS.has(n.tagName) && !n.dataset.fillrSeen) return true;
+          if (n.querySelector) {
+            const found = n.querySelector('input:not([data-fillr-seen]), textarea:not([data-fillr-seen]), select:not([data-fillr-seen])');
+            return !!found;
+          }
+          return false;
+        })
+      );
+      if (hasNew) { clearTimeout(timer); obs.disconnect(); resolve(); }
+    }, 400);
+
+    const obs = new MutationObserver(callback);
+    const watchTarget = document.querySelector('main, [role="main"], form, #content, #app, #root') || document.body;
+    obs.observe(watchTarget, { childList: true, subtree: true });
   });
 }
 
@@ -1226,7 +1373,7 @@ async function fillAndSubmit() {
 
     chrome.runtime.sendMessage({ action: 'signupProgress', stage: 'filling', step: stepCount + 1 }).catch(() => {});
 
-    const result = await autofill();
+    const result = await autofill({ skipFilled: stepCount > 0 });
     totalFilled += result.filled;
 
     // No progress on a subsequent step — nothing more to fill
@@ -1367,6 +1514,7 @@ let _spaDebounce = null;
 const spaObserver = new MutationObserver(() => {
   clearTimeout(_spaDebounce);
   _spaDebounce = setTimeout(() => {
+    _fieldsCacheValid = false; // invalidate fields cache on navigation
     const hasForm = !!document.querySelector('input:not([type=hidden]),select,textarea');
     const btn = document.getElementById('__autofill-float-btn__');
     chrome.storage.local.get('floatingBtn', ({ floatingBtn }) => {
@@ -1391,10 +1539,50 @@ window.addEventListener('beforeunload', () => {
   clearTimeout(_spaDebounce);
 });
 
+// ── Record mode support ────────────────────────────────────────────────────
+let _recordMode = false;
+
+function startRecordMode() {
+  _recordMode = true;
+  document.addEventListener('submit', _captureSubmit, true);
+}
+
+function stopRecordMode() {
+  _recordMode = false;
+  document.removeEventListener('submit', _captureSubmit, true);
+}
+
+function _captureSubmit(e) {
+  if (!_recordMode) return;
+  const form = e.target;
+  if (!form || form.tagName !== 'FORM') return;
+  const recording = {};
+  form.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]), textarea, select').forEach(el => {
+    const label = getLabelText(el) || el.name || el.id || '';
+    if (label && el.value) recording[label] = el.value;
+  });
+  if (Object.keys(recording).length === 0) return;
+  chrome.runtime.sendMessage({ action: 'saveFormRecording', hostname: location.hostname, recording }).catch(() => {});
+}
+
+async function replayRecording() {
+  const { formRecordings = {} } = await new Promise(resolve => chrome.storage.local.get('formRecordings', resolve));
+  const recording = formRecordings[location.hostname];
+  if (!recording) return { filled: 0 };
+  const fields = collectFields();
+  let filled = 0;
+  for (const el of fields) {
+    const label = getLabelText(el) || el.name || el.id || '';
+    const val = recording[label];
+    if (val && await fillField(el, val)) filled++;
+  }
+  return { filled };
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'fill') {
-    autofill().then(result => {
+    autofill({ skipFilled: !!message.skipFilled, passesStart: message.passesStart }).then(result => {
       if (result.filled > 0) {
         chrome.runtime.sendMessage({ action: 'setBadge', count: result.filled }).catch(() => {});
       }
@@ -1430,8 +1618,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  // In-page toast from keyboard shortcut handler (item 17)
+  // In-page toast from keyboard shortcut handler
   if (message.action === 'showPageToast') {
     showPageToast(message.msg);
+  }
+
+  if (message.action === 'preview') {
+    previewFill().then(sendResponse).catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (message.action === 'setRecordMode') {
+    if (message.enabled) startRecordMode(); else stopRecordMode();
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (message.action === 'replayRecording') {
+    replayRecording().then(sendResponse).catch(() => sendResponse({ filled: 0 }));
+    return true;
   }
 });

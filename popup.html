@@ -22,6 +22,10 @@
       </span>
       <span class="btn-hover-blob" aria-hidden="true"></span>
     </button>
+    <button class="btn btn-secondary btn-sm" id="previewFill" title="Preview what Fillr will fill without writing values" style="margin-left:8px">Preview</button>
+  </div>
+  <div id="previewPanel" style="display:none; margin:0 18px 8px; padding:8px; background:var(--surface-2); border:1px solid var(--border-input); border-radius:8px;">
+    <div id="previewTable"></div>
   </div>
 
   <!-- Profile selector -->
@@ -155,6 +159,7 @@
 
     <div class="btn-row">
       <button class="btn btn-primary btn-full" id="saveDetails" title="Save your profile details">Save Details</button>
+      <button class="btn btn-secondary btn-sm" id="resumeFill" style="display:none; margin-top:8px; width:100%" title="Continue filling remaining empty fields (skips already-filled)">Resume Fill</button>
     </div>
 
   </div>
@@ -244,6 +249,31 @@
     <p class="section-title">Fill Stats</p>
     <div class="settings-group" id="fillStatsSection">
       <div id="statsContent"><p class="hint">No fills recorded yet.</p></div>
+    </div>
+
+    <p class="section-title" style="cursor:pointer" id="aiUsageToggle">AI Usage This Session ▸</p>
+    <div class="settings-group" id="aiUsageSection" style="display:none">
+      <div id="aiUsageContent"><p class="hint">Loading…</p></div>
+    </div>
+
+    <p class="section-title">Form Recording</p>
+    <div class="settings-group">
+      <label class="settings-row" style="cursor:pointer">
+        <span class="settings-label">Record Mode</span>
+        <input type="checkbox" id="recordMode" />
+      </label>
+      <p class="hint" style="margin-top:4px">When enabled, Fillr captures form values after you submit manually. Replay recordings on future visits.</p>
+      <button class="btn btn-secondary btn-sm" id="replayRecording" style="display:none; margin-top:6px">Replay Last Fill</button>
+    </div>
+
+    <p class="section-title">Keyboard Shortcut</p>
+    <div class="settings-group">
+      <div class="settings-row">
+        <span class="settings-label">Keyboard Shortcut</span>
+        <span class="hint" style="font-family:var(--font-mono);font-size:11px">Alt+Shift+F</span>
+        <button class="btn btn-sm btn-ghost" id="changeShortcut">Change</button>
+      </div>
+      <p class="hint" style="margin-top:2px;margin-bottom:8px">Active on all pages except blocked sites.</p>
     </div>
 
     <p class="section-title">Data</p>
