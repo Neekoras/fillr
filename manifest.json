@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Fillr",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "description": "Automatically fill web forms using stored profile data with Claude AI fallback",
   "minimum_chrome_version": "102",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
+    "tabs",
     "contextMenus",
     "alarms"
   ],

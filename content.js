@@ -381,8 +381,12 @@ function exactMatch(el) {
 
 // ── Pass 2: Fuzzy word-boundary match ────────────────────────────────────────
 function fuzzyMatch(el) {
+  const rawLabel = getLabelText(el);
+  // Cap label at 80 chars — long instructional labels (e.g. "If you don't have one
+  // yet, please state 'N/A'") cause false positives against short profile keys.
+  const label = rawLabel.length <= 80 ? rawLabel : '';
   const text = [
-    getLabelText(el), // reads from cache — no extra DOM traversal
+    label,
     el.placeholder || '',
     el.name || '',
     el.id || '',
@@ -1593,9 +1597,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.action === 'undoFill') {
     let restored = 0;
-    const promises = undoStack.map(({ el, original }) =>
-      fillField(el, original).then(r => { if (r) restored++; })
-    );
+    const promises = undoStack.map(({ el, original }) => {
+      if (!el.isConnected) return Promise.resolve();
+      return fillField(el, original).then(r => { if (r) restored++; });
+    });
     Promise.all(promises).then(() => {
       undoStack = [];
       sendResponse({ restored });

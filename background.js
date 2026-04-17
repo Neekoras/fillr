@@ -496,7 +496,7 @@ async function handleClaudeFill({ fields, profile, pageContext }, hostname) {
     // Replicate has one model — send all fields together
     const messages = [{ role: 'user', content: buildSonnetPrompt(fields, profileDesc, availableKeys, contextBlock, pageCtxBlock) }];
     const result = await callReplicateAPI(key, messages);
-    if (result.mapping) setCache(fields, result.mapping, hostname);
+    if (result.mapping && !(result.mapping.error && Object.keys(result.mapping).length === 1)) setCache(fields, result.mapping, hostname);
     return result;
   }
 
@@ -537,7 +537,7 @@ async function handleClaudeFill({ fields, profile, pageContext }, hostname) {
     if (r.error) hasError = r.error;
   }
   if (Object.keys(merged).length > 0) {
-    setCache(fields, merged, hostname);
+    if (!(merged.error && Object.keys(merged).length === 1)) setCache(fields, merged, hostname);
     return { mapping: merged };
   }
   return hasError ? { error: hasError } : { mapping: {} };
@@ -856,6 +856,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== 'fillr-fill' || !tab?.id) return;
+  if (!/^https?:\/\//i.test(tab.url || '')) return;
   const hostname = (() => { try { return new URL(tab.url).hostname.toLowerCase(); } catch { return ''; } })();
   const { blockedSites = [] } = await chrome.storage.local.get('blockedSites');
   if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) return;

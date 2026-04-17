@@ -1007,6 +1007,9 @@ input:focus-visible + .toggle-slider {
 
   /* Ensure saved indicator is visible on white background (contrast >4.5:1) */
   .save-indicator.saved { background: #2D8653; }
+
+  /* Onboarding banner almost invisible at rgba(0.10) on white — boost fill */
+  .onboarding-banner { background: rgba(201, 169, 110, 0.15); }
 }
 
 

@@ -481,6 +481,7 @@ function commitProfileName() {
     if (profiles.some((p, i) => i !== activeProfile && p.name.toLowerCase() === name.toLowerCase())) {
       showToast('A profile with that name already exists', true); return;
     }
+    readFormIntoProfile();
     profiles[activeProfile].name = name;
     hideProfileNameInput();
     populateProfileSelect();
@@ -508,10 +509,21 @@ document.getElementById('deleteProfile').addEventListener('click', () => {
   }
   const profileName = profiles[activeProfile].name || `Profile ${activeProfile + 1}`;
   if (!confirm(`Delete "${profileName}"?`)) return;
-  profiles.splice(activeProfile, 1);
-  activeProfile = Math.max(0, activeProfile - 1);
+  readFormIntoProfile();
+  const deletedIdx = activeProfile;
+  profiles.splice(deletedIdx, 1);
+  // Re-index site assignments: remove entries pointing to deleted profile,
+  // decrement entries pointing above it.
+  Object.keys(siteAssignments).forEach(domain => {
+    const idx = siteAssignments[domain];
+    if (idx === deletedIdx) delete siteAssignments[domain];
+    else if (idx > deletedIdx) siteAssignments[domain] = idx - 1;
+  });
+  chrome.storage.local.set({ siteAssignments });
+  activeProfile = Math.max(0, deletedIdx - 1);
   populateProfileSelect();
   loadProfileIntoForm(profiles[activeProfile]);
+  renderSiteAssignList();
   saveProfiles(() => showToast('Profile deleted'));
 });
 
@@ -670,7 +682,7 @@ document.getElementById('exportData').addEventListener('click', () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'fillr-backup.json';
+    a.download = `fillr-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
     showToast('Exported (API key not included)');
@@ -692,7 +704,8 @@ document.getElementById('importFile').addEventListener('change', e => {
         showToast('Invalid backup file', true);
         return;
       }
-      profiles = data.profiles;
+      profiles = data.profiles.filter(p => p && typeof p === 'object' && typeof p.name === 'string');
+      if (profiles.length === 0) { showToast('Invalid backup file', true); return; }
       activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
       const blockedSites = data.blockedSites || [];
       siteAssignments = (data.siteAssignments && typeof data.siteAssignments === 'object' && !Array.isArray(data.siteAssignments)) ? data.siteAssignments : {};
