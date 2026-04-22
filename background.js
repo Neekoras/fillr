@@ -753,7 +753,7 @@ async function testReplicateKey(apiKey) {
   }
   // Key is valid even if prediction hasn't completed yet (status: "processing")
   return { ok: true };
-}
+
 
 // ── Handler timeout helper ─────────────────────────────────────────────────
 function handlerTimeout(ms, action) {
@@ -863,5 +863,5 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   chrome.tabs.sendMessage(tab.id, { action: 'fill' }, result => {
     if (chrome.runtime.lastError) return;
     if (result?.filled > 0) setBadge(result.filled);
-  });
+
 });
