@@ -508,7 +508,9 @@ async function fillField(el, value) {
       : view.HTMLInputElement.prototype;
     const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
     if (nativeSetter) nativeSetter.call(el, finalVal); else el.value = finalVal;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: finalVal }));
+    // Use a plain Event (not InputEvent with insertText) so React reads the DOM
+    // value we just set rather than treating it as a text insertion delta.
+    el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
 
     // React Hook Form + MUI compatibility (item 6)
