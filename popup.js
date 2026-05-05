@@ -229,7 +229,7 @@ function renderFillStats() {
           ${topDomains.map(([domain, count]) => `
             <div class="stat-bar-row">
               <span style="min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${domain}</span>
-              <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.round((count/maxCount)*100)}%"></div></div>
+              <div class="stat-bar"><div class="stat-bar-fill" style="transform:scaleX(${Math.round((count/maxCount)*100)/100})"></div></div>
               <span style="min-width:20px;text-align:right">${count}</span>
             </div>
           `).join('')}
@@ -523,6 +523,49 @@ document.getElementById('deleteProfile').addEventListener('click', () => {
   });
   chrome.storage.local.set({ siteAssignments });
   activeProfile = Math.max(0, deletedIdx - 1);
+  populateProfileSelect();
+  loadProfileIntoForm(profiles[activeProfile]);
+  renderSiteAssignList();
+  saveProfiles(() => showToast('Profile deleted'));
+});
+
+// ── Export / Import ──────────────────────────────────────────────────────────
+document.getElementById('exportData').addEventListener('click', () => {
+  chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'signupHistory', 'fieldOverrides'], data => {
+    const exportObj = {
+      profiles: data.profiles || profiles,
+      activeProfile: data.activeProfile ?? activeProfile,
+      blockedSites: data.blockedSites || [],
+      siteAssignments: data.siteAssignments || {},
+      signupHistory: data.signupHistory || [],
+      fieldOverrides: data.fieldOverrides || {}
+    };
+    const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `fillr-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Exported (API key not included)');
+  });
+});
+
+document.getElementById('importData').addEventListener('click', () => {
+  document.getElementById('importFile').click();
+});
+
+document.getElementById('importFile').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = evt => {
+    try {
+      const data = JSON.parse(evt.target.result);
+      if (!Array.isArray(data.profiles) || data.profiles.length === 0) {
+        showToast('Invalid backup file', true);
+        return;
+      }
       profiles = data.profiles.filter(p => p && typeof p === 'object' && typeof p.name === 'string');
       if (profiles.length === 0) { showToast('Invalid backup file', true); return; }
       activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
@@ -571,6 +614,7 @@ function renderSiteAssignList() {
   entries.forEach(([domain, profileIdx]) => {
     const row = document.createElement('div');
     row.className = 'site-assign-saved-row';
+    row.dataset.domain = domain;
 
     const domainSpan = document.createElement('span');
     domainSpan.className = 'site-assign-domain';
@@ -583,12 +627,7 @@ function renderSiteAssignList() {
     const delBtn = document.createElement('button');
     delBtn.className = 'btn btn-sm btn-ghost';
     delBtn.textContent = 'Remove';
-    delBtn.addEventListener('click', () => {
-      delete siteAssignments[domain];
-      chrome.storage.local.set({ siteAssignments });
-      renderSiteAssignList();
-      showToast(`Removed assignment for ${domain}`);
-    });
+    delBtn.dataset.action = 'remove';
 
     row.appendChild(domainSpan);
     row.appendChild(profileSpan);
@@ -596,6 +635,19 @@ function renderSiteAssignList() {
     list.appendChild(row);
   });
 }
+
+// Event delegation for site assignment removal — one listener instead of N
+document.getElementById('siteAssignList')?.addEventListener('click', e => {
+  const btn = e.target.closest('[data-action="remove"]');
+  if (!btn) return;
+  const row = btn.closest('.site-assign-saved-row');
+  if (!row) return;
+  const domain = row.dataset.domain;
+  delete siteAssignments[domain];
+  chrome.storage.local.set({ siteAssignments });
+  row.remove();
+  showToast(`Removed assignment for ${domain}`);
+});
 
 document.getElementById('siteAssignSave').addEventListener('click', () => {
   const domain = document.getElementById('siteAssignDomain').textContent;

@@ -66,9 +66,14 @@ function buildFieldList(fields) {
 
 function buildFieldListCapped(fields) {
   return fields.slice(0, 30).map(f => {
-    let line = `id=${JSON.stringify(f.id)} name=${JSON.stringify(f.name)} placeholder=${JSON.stringify(f.placeholder)} label=${JSON.stringify(f.label)} type=${JSON.stringify(f.type)}`;
-    if (f.options && f.options.length) line += ` options=[${f.options.map(o => JSON.stringify(o)).join(', ')}]`;
-    return line;
+    const parts = [`id=${JSON.stringify(f.id)}`, `name=${JSON.stringify(f.name)}`, `type=${JSON.stringify(f.type)}`];
+    const label = f.label || '';
+    const placeholder = f.placeholder || '';
+    if (label) parts.push(`label=${JSON.stringify(label)}`);
+    // Omit placeholder if it duplicates label
+    if (placeholder && placeholder !== label) parts.push(`placeholder=${JSON.stringify(placeholder)}`);
+    if (f.options && f.options.length) parts.push(`options=[${f.options.map(o => JSON.stringify(o)).join(', ')}]`);
+    return parts.join(' ');
   }).join('\n');
 }
 
@@ -124,7 +129,7 @@ class LRUMap {
   delete(key) { return this.map.delete(key); }
 }
 
-const fillCache = new LRUMap(50);
+const fillCache = new LRUMap(150);
 const CACHE_TTL = 10 * 60 * 1000;
 
 function fingerprint(fields, hostname) {
@@ -243,32 +248,51 @@ async function callReplicateAPI(apiKey, messages) {
 }
 
 // ── AI usage dashboard tracking ────────────────────────────────────────────
-async function trackApiUsage({ pass, inputTokens, outputTokens, model }) {
-  try {
-    const data = await chrome.storage.session.get('aiUsage').catch(() => ({}));
-    const aiUsage = data.aiUsage || { calls: {}, inputTokens: 0, outputTokens: 0, totalCost: 0, mostExpensive: null };
-    if (pass) aiUsage.calls[pass] = (aiUsage.calls[pass] || 0) + 1;
-    aiUsage.inputTokens += inputTokens || 0;
-    aiUsage.outputTokens += outputTokens || 0;
-    const PRICING = {
-      'claude-sonnet-4-6': { input: 3 / 1e6, output: 15 / 1e6 },
-      'claude-haiku-4-5-20251001': { input: 0.25 / 1e6, output: 1.25 / 1e6 }
-    };
-    const prices = PRICING[model] || PRICING['claude-sonnet-4-6'];
-    aiUsage.totalCost = (aiUsage.totalCost || 0) + (inputTokens || 0) * prices.input + (outputTokens || 0) * prices.output;
-    await chrome.storage.session.set({ aiUsage }).catch(() => {});
-  } catch {}
+let _aiUsageCache = null;
+let _aiUsageDirty = false;
+let _aiUsageFlushTimer = null;
+
+function _flushAiUsage() {
+  if (!_aiUsageDirty || !_aiUsageCache) return;
+  _aiUsageDirty = false;
+  chrome.storage.session.set({ aiUsage: _aiUsageCache }).catch(() => {});
+}
+
+function trackApiUsage({ pass, inputTokens, outputTokens, model }) {
+  if (!_aiUsageCache) {
+    // Lazy-init from storage on first call
+    chrome.storage.session.get('aiUsage').then(d => {
+      _aiUsageCache = d.aiUsage || { calls: {}, inputTokens: 0, outputTokens: 0, totalCost: 0 };
+    }).catch(() => {
+      _aiUsageCache = { calls: {}, inputTokens: 0, outputTokens: 0, totalCost: 0 };
+    });
+    // Schedule delayed init flush
+    setTimeout(() => { if (_aiUsageCache) trackApiUsage({ pass, inputTokens, outputTokens, model }); }, 100);
+    return;
+  }
+  if (pass) _aiUsageCache.calls[pass] = (_aiUsageCache.calls[pass] || 0) + 1;
+  _aiUsageCache.inputTokens += inputTokens || 0;
+  _aiUsageCache.outputTokens += outputTokens || 0;
+  const PRICING = {
+    'claude-sonnet-4-6': { input: 3 / 1e6, output: 15 / 1e6 },
+    'claude-haiku-4-5-20251001': { input: 0.25 / 1e6, output: 1.25 / 1e6 }
+  };
+  const prices = PRICING[model] || PRICING['claude-sonnet-4-6'];
+  _aiUsageCache.totalCost = (_aiUsageCache.totalCost || 0) + (inputTokens || 0) * prices.input + (outputTokens || 0) * prices.output;
+  _aiUsageDirty = true;
+  clearTimeout(_aiUsageFlushTimer);
+  _aiUsageFlushTimer = setTimeout(_flushAiUsage, 2000);
 }
 
 // ── Anthropic API call with retry + exponential backoff ────────────────────
 async function callAnthropicAPI(apiKey, messages, { system, model, maxTokens } = {}) {
-  const delays = [0, 1000, 3000];
+  const backoff = [0, 1000, 3000];
   let lastError = 'Request failed';
   const useModel = model || 'claude-sonnet-4-6';
   const useCaching = !!system;
 
-  for (let attempt = 0; attempt < delays.length; attempt++) {
-    if (delays[attempt] > 0) await new Promise(r => setTimeout(r, delays[attempt]));
+  for (let attempt = 0; attempt < backoff.length; attempt++) {
+    if (backoff[attempt] > 0) await new Promise(r => setTimeout(r, backoff[attempt]));
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30000);
@@ -299,7 +323,7 @@ async function callAnthropicAPI(apiKey, messages, { system, model, maxTokens } =
     if (response.status === 429 || response.status === 529 || response.status >= 500) {
       const retryAfterRaw = parseInt(response.headers.get('retry-after') || '0', 10) * 1000;
       const wait = retryAfterRaw > 0 ? retryAfterRaw : 2000;
-      if (attempt + 1 < delays.length) delays[attempt + 1] = wait;
+      if (attempt + 1 < backoff.length) backoff[attempt + 1] = Math.max(backoff[attempt + 1], wait);
       lastError = `API error ${response.status}`;
       continue;
     }
@@ -508,24 +532,25 @@ async function handleClaudeFill({ fields, profile, pageContext }, hostname) {
 
   // Build prompts
   const buildPrompt = (subset) => buildSonnetPrompt(subset, profileDesc, availableKeys, contextBlock, pageCtxBlock);
+  const systemBlock = buildCachedSystemBlock(profileDesc, contextBlock);
 
   const calls = [];
   if (structuredFields.length > 0) {
     calls.push(
       callAnthropicAPI(key, [{ role: 'user', content: buildPrompt(structuredFields) }], {
-        system: buildCachedSystemBlock(profileDesc, contextBlock),
+        system: systemBlock,
         model: 'claude-haiku-4-5-20251001',
         maxTokens: 512
-      }).then(r => { if (r.mapping) trackApiUsage({ pass: 'p3-haiku', model: 'claude-haiku-4-5-20251001' }).catch(() => {}); return r; })
+      }).then(r => { if (r.mapping) trackApiUsage({ pass: 'p3-haiku', model: 'claude-haiku-4-5-20251001' }); return r; })
     );
   }
   if (sonnetFields.length > 0) {
     calls.push(
       callAnthropicAPI(key, [{ role: 'user', content: buildPrompt(sonnetFields) }], {
-        system: buildCachedSystemBlock(profileDesc, contextBlock),
+        system: systemBlock,
         model: 'claude-sonnet-4-6',
         maxTokens: 512
-      }).then(r => { if (r.mapping) trackApiUsage({ pass: 'p3-sonnet', model: 'claude-sonnet-4-6' }).catch(() => {}); return r; })
+      }).then(r => { if (r.mapping) trackApiUsage({ pass: 'p3-sonnet', model: 'claude-sonnet-4-6' }); return r; })
     );
   }
 
@@ -570,6 +595,10 @@ async function downscaleScreenshot(dataUrl) {
 
 // ── Pass 4: Claude vision fill ─────────────────────────────────────────────
 async function handleClaudeVisionFill({ fields, profile, pageContext, windowId }) {
+  // Early exit if no fields to fill — don't waste a screenshot
+  if (!fields || fields.length === 0) {
+    return { skipped: true, reason: 'No unmatched fields for vision pass' };
+  }
   // Check if current provider supports vision
   const { aiProvider, apiKey } = await chrome.storage.local.get(['aiProvider', 'apiKey']);
   const provider = aiProvider || 'anthropic';
@@ -753,7 +782,7 @@ async function testReplicateKey(apiKey) {
   }
   // Key is valid even if prediction hasn't completed yet (status: "processing")
   return { ok: true };
-
+}
 
 // ── Handler timeout helper ─────────────────────────────────────────────────
 function handlerTimeout(ms, action) {
@@ -805,17 +834,17 @@ const HANDLERS = {
   fillProgress: (msg, sender, sendResponse) => { sendResponse({ ok: true }); return false; },
   signupProgress: (msg, sender, sendResponse) => { sendResponse({ ok: true }); return false; },
   saveFormRecording: (msg, sender, sendResponse) => {
-    chrome.storage.local.get('formRecordings', data => {
-      const recordings = data.formRecordings || {};
-      recordings[msg.hostname] = msg.recording;
-      if (Object.keys(recordings).length > 50) {
-        const oldest = Object.keys(recordings)[0];
-        delete recordings[oldest];
+    (async () => {
+      const { formRecordings = {} } = await chrome.storage.local.get('formRecordings');
+      formRecordings[msg.hostname] = msg.recording;
+      if (Object.keys(formRecordings).length > 50) {
+        const oldest = Object.keys(formRecordings)[0];
+        delete formRecordings[oldest];
       }
-      chrome.storage.local.set({ formRecordings: recordings });
-    });
-    sendResponse({ ok: true });
-    return false;
+      await chrome.storage.local.set({ formRecordings });
+      sendResponse({ ok: true });
+    })();
+    return true;
   },
 };
 
@@ -863,5 +892,5 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   chrome.tabs.sendMessage(tab.id, { action: 'fill' }, result => {
     if (chrome.runtime.lastError) return;
     if (result?.filled > 0) setBadge(result.filled);
-
+  });
 });

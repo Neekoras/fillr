@@ -191,7 +191,7 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: all var(--transition);
+  transition: background var(--transition), color var(--transition);
   line-height: 1;
   padding: 0;
 }
@@ -361,7 +361,7 @@ textarea {
   border-radius: var(--radius-input);
   border: none;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
 
 .btn-primary {
@@ -886,7 +886,7 @@ input:focus-visible + .toggle-slider {
 .stat-bar-wrap { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .stat-bar-row { display: flex; align-items: center; gap: 8px; font-size: 11px; font-family: var(--font-mono); }
 .stat-bar { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
-.stat-bar-fill { height: 100%; background: var(--gold); border-radius: 2px; transition: width 0.3s ease; }
+.stat-bar-fill { height: 100%; background: var(--gold); border-radius: 2px; will-change: transform; transform-origin: left; transition: transform 0.3s ease; }
 
 /* ── Site-add confirmation (item 31) ───────────────────────────────────────── */
 .site-add-confirm {

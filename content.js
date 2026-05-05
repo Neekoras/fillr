@@ -213,6 +213,8 @@ function debounce(fn, ms) {
 let _fieldsCache = null;
 let _fieldsCacheValid = false;
 let _fieldsCacheFillAll = false;
+const radioGroupCache = new Map();
+const muiWrapperCache = new WeakMap();
 
 // Tracks fields filled in this page session — used by skipFilled mode
 const _filledThisSession = new WeakSet();
@@ -223,9 +225,13 @@ const _filledThisSession = new WeakSet();
 function collectShadowFields(root, depth = 0, maxDepth = 4) {
   if (depth > maxDepth) return [];
   const fields = Array.from(root.querySelectorAll(FIELD_SELECTOR));
-  root.querySelectorAll('*').forEach(el => {
-    if (el.shadowRoot) fields.push(...collectShadowFields(el.shadowRoot, depth + 1, maxDepth));
-  });
+  // Only check elements that actually have a shadowRoot — avoid scanning every node
+  const allEls = root.querySelectorAll('*');
+  for (let i = 0; i < allEls.length; i++) {
+    if (allEls[i].shadowRoot) {
+      fields.push(...collectShadowFields(allEls[i].shadowRoot, depth + 1, maxDepth));
+    }
+  }
   return fields;
 }
 
@@ -255,7 +261,8 @@ function collectFields(fillAll = false, skipFilled = false) {
     if (el.type === 'checkbox') return !el.checked;
     if (el.type === 'radio') {
       if (!el.name) return false;
-      const group = Array.from((el.getRootNode() || document).querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+      const group = radioGroupCache.get(el.name) || Array.from((el.getRootNode() || document).querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
+      if (!radioGroupCache.has(el.name)) radioGroupCache.set(el.name, group);
       if (group.some(r => r.checked)) return false;
       return group[0] === el;
     }
@@ -275,6 +282,10 @@ function collectFields(fillAll = false, skipFilled = false) {
     _fieldsCache = result;
     _fieldsCacheValid = true;
     _fieldsCacheFillAll = fillAll;
+    // Pre-cache MUI wrappers for all collected fields (avoid per-field DOM query during fill)
+    for (const el of result) {
+      if (el.closest?.('.MuiInputBase-root')) muiWrapperCache.set(el, el.closest('.MuiInputBase-root'));
+    }
   }
   return result;
 }
@@ -352,12 +363,10 @@ function getLabelText(el) {
   return result;
 }
 
-// MutationObserver to clear stale label cache on SPA navigation
+// MutationObserver to invalidate caches on DOM mutation
 const labelCacheObserver = new MutationObserver(debounce(() => {
-  _fieldsCacheValid = false; // invalidate fields cache on DOM mutation
-  document.querySelectorAll('[data-fillr-label]').forEach(el => {
-    delete el.dataset.fillrLabel;
-  });
+  _fieldsCacheValid = false; // invalidate fields cache — labels will re-cache lazily in getLabelText
+  radioGroupCache.clear();
 }, 200));
 labelCacheObserver.observe(document.body, { childList: true, subtree: true });
 
@@ -513,12 +522,13 @@ async function fillField(el, value) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
 
-    // React Hook Form + MUI compatibility (item 6)
+    // React Hook Form compatibility: blur/focus cycle triggers validation
     el.dispatchEvent(new Event('blur', { bubbles: true }));
     el.dispatchEvent(new Event('focus', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    if (el.closest?.('.MuiInputBase-root')) {
-      const wrapper = el.closest('.MuiInputBase-root');
+    // Use cached MUI wrapper lookup instead of querying DOM on every field
+    const wrapper = muiWrapperCache.get(el) || el.closest?.('.MuiInputBase-root');
+    if (wrapper) {
+      if (!muiWrapperCache.has(el)) muiWrapperCache.set(el, wrapper);
       wrapper.dispatchEvent(new Event('input', { bubbles: true }));
     }
   }
@@ -537,7 +547,7 @@ function findCustomDropdowns() {
 
   const candidates = [
     ...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="true"]'),
-    ...document.querySelectorAll('button, div, span')
+    ...document.querySelectorAll('[data-testid*="select"], [class*="dropdown"], [class*="select"], [class*="combobox"]')
   ];
 
   for (const el of candidates) {
@@ -601,7 +611,9 @@ function findVisibleDropdownOptions() {
       const s = window.getComputedStyle(el);
       return (s.position === 'absolute' || s.position === 'fixed') && s.display !== 'none' && s.visibility !== 'hidden';
     })
-    .sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+    .map(el => ({ el, top: el.getBoundingClientRect().top }))
+    .sort((a, b) => b.top - a.top)
+    .map(x => x.el);
 
   for (const container of containers) {
     const items = Array.from(container.querySelectorAll('li, [class*="option"], [class*="item"]'))
@@ -663,7 +675,24 @@ async function fillCustomDropdown(el, value) {
   const lower = value.toLowerCase().trim();
   el.click();
   el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-  await new Promise(r => setTimeout(r, 400));
+
+  // Wait for dropdown to appear — check immediately, then use MutationObserver
+  // with a short fallback timeout instead of a hard 400ms sleep
+  await new Promise(resolve => {
+    // Immediate check — many dropdowns render synchronously on click
+    const checkNow = () => {
+      const opts = document.querySelectorAll('[role="listbox"] li, [role="option"], [class*="dropdown"] li, [class*="menu"] li, ul[style*="block"] li');
+      return opts.length > 0;
+    };
+    if (checkNow()) { resolve(); return; }
+    let resolved = false;
+    const timer = setTimeout(() => { if (!resolved) { resolved = true; obs.disconnect(); resolve(); } }, 200);
+    const obs = new MutationObserver(() => {
+      if (resolved) return;
+      if (checkNow()) { resolved = true; clearTimeout(timer); obs.disconnect(); resolve(); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  });
 
   const optionEls = findVisibleDropdownOptions();
   if (!optionEls.length) { document.body.click(); return false; }
@@ -685,7 +714,7 @@ async function fillCustomDropdown(el, value) {
   match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
   match.click();
   match.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-  await new Promise(r => setTimeout(r, 150));
+  await new Promise(r => setTimeout(r, 25));
 
   el.classList.add('autofill-highlight');
   setTimeout(() => el.classList.remove('autofill-highlight'), 1500);
@@ -1466,11 +1495,14 @@ function hasFormElements() {
   return document.querySelectorAll('input:not([type=hidden]), textarea, select').length > 0;
 }
 
+let _floatingBtnCreating = false;
 function createFloatingButton() {
-  if (document.getElementById('__autofill-float-btn__')) return;
+  if (_floatingBtnCreating || document.getElementById('__autofill-float-btn__')) return;
   if (!hasFormElements()) return;
+  _floatingBtnCreating = true;
 
   chrome.storage.local.get('blockedSites', ({ blockedSites = [] }) => {
+    _floatingBtnCreating = false;
     const hostname = location.hostname.toLowerCase();
     if (blockedSites.map(s => s.toLowerCase()).some(d => hostname === d || hostname.endsWith('.' + d))) return;
 
