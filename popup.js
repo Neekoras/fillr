@@ -42,11 +42,12 @@ function emptyProfile(name) {
 function loadProfileIntoForm(profile) {
   PROFILE_KEYS.forEach(key => {
     const el = document.getElementById(key);
-    if (el) el.value = profile[key] || '';
+    if (el) {
+      el.value = profile[key] || '';
+      lastSaved[key] = profile[key] || '';
+    }
   });
   updateCompleteness();
-  // Update lastSaved to current form state
-  PROFILE_KEYS.forEach(k => { const el = document.getElementById(k); if (el) lastSaved[k] = el.value.trim(); });
 }
 
 function readFormIntoProfile() {
@@ -222,20 +223,39 @@ function renderFillStats() {
     const topDomains = Object.entries(domainCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
     const maxCount = topDomains[0]?.[1] || 1;
 
-    el.innerHTML = `
-      <p class="hint" style="margin-bottom:8px">Total fills: <strong style="color:var(--text-primary)">${totalFills}</strong> · Avg fields: <strong style="color:var(--text-primary)">${avgFields}</strong></p>
-      ${topDomains.length ? `
-        <div class="stat-bar-wrap">
-          ${topDomains.map(([domain, count]) => `
-            <div class="stat-bar-row">
-              <span style="min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${domain}</span>
-              <div class="stat-bar"><div class="stat-bar-fill" style="transform:scaleX(${Math.round((count/maxCount)*100)/100})"></div></div>
-              <span style="min-width:20px;text-align:right">${count}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
-    `;
+    // Build DOM safely — avoid innerHTML with user-provided hostnames
+    el.textContent = '';
+    const header = document.createElement('p');
+    header.className = 'hint';
+    header.style.marginBottom = '8px';
+    header.innerHTML = `Total fills: <strong style="color:var(--text-primary)">${totalFills}</strong> · Avg fields: <strong style="color:var(--text-primary)">${avgFields}</strong>`;
+    el.appendChild(header);
+
+    if (topDomains.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'stat-bar-wrap';
+      topDomains.forEach(([domain, count]) => {
+        const row = document.createElement('div');
+        row.className = 'stat-bar-row';
+        const label = document.createElement('span');
+        label.style.cssText = 'min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        label.textContent = domain; // textContent — safe
+        const bar = document.createElement('div');
+        bar.className = 'stat-bar';
+        const fill = document.createElement('div');
+        fill.className = 'stat-bar-fill';
+        fill.style.transform = `scaleX(${Math.round((count/maxCount)*100)/100})`;
+        bar.appendChild(fill);
+        const countEl = document.createElement('span');
+        countEl.style.cssText = 'min-width:20px;text-align:right';
+        countEl.textContent = count;
+        row.appendChild(label);
+        row.appendChild(bar);
+        row.appendChild(countEl);
+        wrap.appendChild(row);
+      });
+      el.appendChild(wrap);
+    }
   });
 }
 
@@ -1040,18 +1060,35 @@ document.getElementById('previewFill')?.addEventListener('click', () => {
       const table = document.getElementById('previewTable');
       if (!panel || !table) return;
       panel.style.display = 'block';
-      table.innerHTML = `
-        <p class="hint" style="margin-bottom:4px">P1/P2: ${response.matchedCount} matched · AI required: ${response.unmatchedCount}</p>
-        <div style="max-height:160px;overflow-y:auto">
-          ${response.preview.map(r => `
-            <div style="display:flex;gap:6px;align-items:baseline;padding:2px 0;font-size:11px;font-family:var(--font-mono)">
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)" title="${r.label}">${r.label}</span>
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${r.value ? 'var(--text-primary)' : 'var(--error)'}">${r.value || 'AI required'}</span>
-              <span style="min-width:60px;text-align:right;color:var(--text-muted)">${r.pass}</span>
-            </div>
-          `).join('')}
-        </div>
-      `;
+      // Build DOM safely — preview data comes from page DOM and could contain XSS
+      table.textContent = '';
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.style.marginBottom = '4px';
+      hint.textContent = `P1/P2: ${response.matchedCount} matched · AI required: ${response.unmatchedCount}`;
+      table.appendChild(hint);
+      const scroll = document.createElement('div');
+      scroll.style.cssText = 'max-height:160px;overflow-y:auto';
+      response.preview.forEach(r => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:6px;align-items:baseline;padding:2px 0;font-size:11px;font-family:var(--font-mono)';
+        const labelEl = document.createElement('span');
+        labelEl.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)';
+        labelEl.title = r.label;
+        labelEl.textContent = r.label;
+        const valEl = document.createElement('span');
+        valEl.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        valEl.style.color = r.value ? 'var(--text-primary)' : 'var(--error)';
+        valEl.textContent = r.value || 'AI required';
+        const passEl = document.createElement('span');
+        passEl.style.cssText = 'min-width:60px;text-align:right;color:var(--text-muted)';
+        passEl.textContent = r.pass;
+        row.appendChild(labelEl);
+        row.appendChild(valEl);
+        row.appendChild(passEl);
+        scroll.appendChild(row);
+      });
+      table.appendChild(scroll);
     });
   });
 });

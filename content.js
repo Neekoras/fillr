@@ -833,9 +833,11 @@ let isFilling = false;
 async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
   if (isFilling) return { filled: 0 };
   isFilling = true;
+  window.__fillrFillStart = Date.now();
+  const pageContext = getPageContext(); // Cache once for all passes
   try {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments', 'fieldOverrides', 'fillAll'], resolve)
+    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments', 'fieldOverrides'], resolve)
   );
 
   const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
@@ -860,13 +862,12 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
   const profile = getProfile(profileData || {});
   const apiKey = storageData.apiKey || '';
   const fieldOverrides = storageData.fieldOverrides || {};
-  const fillAll = !!storageData.fillAll;
   let apiError = null;
 
   // Cross-origin iframe tracking reset
   window.__fillrCrossOriginFrames = 0;
 
-  const fields = collectFields(fillAll, skipFilled);
+  const fields = collectFields(false, skipFilled);
   let filledCount = 0;
   let firstFilledEl = null;
   const unmatched = [];
@@ -879,8 +880,7 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
     if (el.type === 'checkbox') {
       originalValues.set(el, el.checked ? 'checked' : 'unchecked');
     } else if (el.type === 'radio' && el.name) {
-      const root = el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
-      const group = root.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      const group = radioGroupCache.get(el.name) || Array.from((el.getRootNode() || document).querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
       originalValues.set(el, Array.from(group).find(r => r.checked)?.value || '');
     } else {
       const snapshotVal = el.getAttribute('value') ?? el.defaultValue ?? el.value ?? '';
@@ -965,7 +965,7 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
           action: 'claudeFill',
           fields: descriptors,
           profile: profileWithFullName,
-          pageContext: getPageContext(),
+          pageContext: pageContext,
         });
 
         if (response && response.mapping) {
@@ -999,7 +999,7 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
           action: 'claudeVisionFill',
           fields: descriptors,
           profile: profileWithFullName,
-          pageContext: getPageContext(),
+          pageContext: pageContext,
         });
 
         // Vision pass provider skip (item 9)
@@ -1045,7 +1045,7 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
           action: 'claudeFill',
           fields: customDescriptors,
           profile: profileWithFullName,
-          pageContext: getPageContext(),
+          pageContext: pageContext,
         });
         if (customResponse && customResponse.mapping) {
           for (let i = 0; i < customDropdowns.length; i++) {
@@ -1076,8 +1076,7 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
     if (el.type === 'checkbox') {
       current = el.checked ? 'checked' : 'unchecked';
     } else if (el.type === 'radio' && el.name) {
-      const root = el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
-      const group = root.querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`);
+      const group = radioGroupCache.get(el.name) || Array.from((el.getRootNode() || document).querySelectorAll(`input[type=radio][name="${CSS.escape(el.name)}"]`));
       current = Array.from(group).find(r => r.checked)?.value || '';
     } else {
       current = el.tagName === 'SELECT' || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
@@ -1097,15 +1096,16 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
     : null;
 
   // Send analytics to background
+  const fillEndTime = Date.now();
   chrome.runtime.sendMessage({
     action: 'saveFillAnalytics',
     data: {
       hostname,
-      totalFields: fields.length + unmatched.length,
+      totalFields: fields.length,
       filledFields: filledCount,
-      passBreakdown: {},
-      apiCallsMade: apiKey ? 1 : 0,
-      durationMs: 0
+      passBreakdown: { p1p2: p1p2Count, p3: p3Count, p4: p4Count, p5: p5Count },
+      apiCallsMade: (p3Count > 0 ? 1 : 0) + (p4Count > 0 ? 1 : 0) + (p5Count > 0 ? 1 : 0),
+      durationMs: fillEndTime - (window.__fillrFillStart || fillEndTime)
     }
   }).catch(() => {});
 
@@ -1158,7 +1158,7 @@ async function resolveConfirmFields(filledEntries) {
 // ── Preview fill ───────────────────────────────────────────────────────────
 async function previewFill() {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'fieldOverrides', 'fillAll'], resolve)
+    chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'fieldOverrides'], resolve)
   );
   const hostname = location.hostname.toLowerCase();
   let profileData;
@@ -1171,9 +1171,8 @@ async function previewFill() {
   } else { profileData = storageData; }
   const profile = getProfile(profileData || {});
   const fieldOverrides = storageData.fieldOverrides || {};
-  const fillAll = !!storageData.fillAll;
 
-  const fields = collectFields(fillAll);
+  const fields = collectFields(false);
   const results = [];
 
   for (const el of fields) {
@@ -1367,7 +1366,9 @@ function collectFieldErrors() {
 // Wait for new (previously unseen) fields to appear
 function waitForNewFields(timeout) {
   return new Promise(resolve => {
-    const timer = setTimeout(resolve, timeout);
+    let resolved = false;
+    const finish = () => { if (!resolved) { resolved = true; obs.disconnect(); clearTimeout(timer); resolve(); } };
+    const timer = setTimeout(finish, timeout);
     document.querySelectorAll('input, textarea, select, [contenteditable]').forEach(el => el.dataset.fillrSeen = '1');
 
     const FIELD_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
@@ -1383,7 +1384,7 @@ function waitForNewFields(timeout) {
           return false;
         })
       );
-      if (hasNew) { clearTimeout(timer); obs.disconnect(); resolve(); }
+      if (hasNew) finish();
     }, 400);
 
     const obs = new MutationObserver(callback);
@@ -1471,6 +1472,7 @@ async function fillAndSubmit() {
 }
 
 // ── In-page toast (item 17) ───────────────────────────────────────────────────
+const _pageToastTimers = new WeakMap();
 function showPageToast(msg) {
   let el = document.getElementById('__fillr-page-toast__');
   if (!el) {
@@ -1486,8 +1488,9 @@ function showPageToast(msg) {
   }
   el.textContent = msg;
   el.style.opacity = '1';
-  clearTimeout(el.__timer);
-  el.__timer = setTimeout(() => { el.style.opacity = '0'; }, 3000);
+  const existing = _pageToastTimers.get(el);
+  if (existing) clearTimeout(existing);
+  _pageToastTimers.set(el, setTimeout(() => { el.style.opacity = '0'; }, 3000));
 }
 
 // ── Floating button ───────────────────────────────────────────────────────────
