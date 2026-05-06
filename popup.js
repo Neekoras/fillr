@@ -240,13 +240,13 @@ function renderFillStats() {
 }
 
 // ── Load stored values on popup open ─────────────────────────────────────────
-chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKey', 'aiProvider', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'siteAssignments', 'signupHistory', 'fieldOverrides', 'recordMode', 'formRecordings'], data => {
+// Split into critical path (profiles) and lazy path (settings/stats)
+chrome.storage.local.get(['profiles', 'activeProfile', 'siteAssignments', 'signupHistory', 'fieldOverrides'], data => {
   if (data.profiles && data.profiles.length > 0) {
     profiles = data.profiles;
     activeProfile = Math.min(data.activeProfile || 0, profiles.length - 1);
   } else {
     const p = emptyProfile('Default');
-    PROFILE_KEYS.forEach(k => { p[k] = data[k] || ''; });
     profiles = [p];
     activeProfile = 0;
   }
@@ -265,18 +265,32 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKe
   populateProfileSelect();
   loadProfileIntoForm(profiles[activeProfile]);
 
-  if (data.apiKey) document.getElementById('apiKey').value = data.apiKey;
-  if (data.replicateApiKey) document.getElementById('replicateApiKey').value = data.replicateApiKey;
-  const provider = data.aiProvider || 'anthropic';
-  document.getElementById('aiProvider').value = provider;
-  updateProviderUI(provider);
-  document.getElementById('floatingBtn').checked = !!data.floatingBtn;
-  if (data.blockedSites) document.getElementById('blockedSites').value = data.blockedSites.join('\n');
-
   populateSiteAssignSelect();
   renderSiteAssignList();
   renderSignupHistory(signupHistory);
   setupOverrideBadges(data.fieldOverrides || {});
+
+  // Lazy-load settings tab data — not needed until user clicks the tab
+  chrome.storage.local.get(['apiKey', 'replicateApiKey', 'aiProvider', 'floatingBtn', 'blockedSites', 'onboardingSeen', 'recordMode', 'formRecordings'], data2 => {
+    if (data2.apiKey) document.getElementById('apiKey').value = data2.apiKey;
+    if (data2.replicateApiKey) document.getElementById('replicateApiKey').value = data2.replicateApiKey;
+    const provider = data2.aiProvider || 'anthropic';
+    document.getElementById('aiProvider').value = provider;
+    updateProviderUI(provider);
+    document.getElementById('floatingBtn').checked = !!data2.floatingBtn;
+    if (data2.blockedSites) document.getElementById('blockedSites').value = data2.blockedSites.join('\n');
+    if (data2.recordMode) document.getElementById('recordMode').checked = data2.recordMode;
+
+    // Onboarding banner
+    if (!data2.onboardingSeen) {
+      const coreKeys = PROFILE_KEYS.filter(k => k !== 'context');
+      const allEmpty = coreKeys.every(k => !profiles[activeProfile][k]);
+      if (allEmpty) {
+        const banner = document.getElementById('onboardingBanner');
+        if (banner) banner.style.display = 'block';
+      }
+    }
+  });
 
   // Load current site info
   chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
@@ -301,16 +315,6 @@ chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'replicateApiKe
       }
     } catch {}
   });
-
-  // Onboarding banner
-  if (!data.onboardingSeen) {
-    const coreKeys = PROFILE_KEYS.filter(k => k !== 'context');
-    const allEmpty = coreKeys.every(k => !profiles[activeProfile][k]);
-    if (allEmpty) {
-      const banner = document.getElementById('onboardingBanner');
-      if (banner) banner.style.display = 'block';
-    }
-  }
 });
 
 // ── Per-field override badges (item 18) ──────────────────────────────────────

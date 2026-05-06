@@ -477,7 +477,7 @@ function buildCachedSystemBlock(profileDesc, contextBlock) {
   return [
     {
       type: 'text',
-      text: `You are helping autofill a web form. Return a JSON object (or a JSON code block) mapping each field's id (or name if no id) to the correct value.\n\nUser profile:\n${profileDesc}\n${contextBlock}\n\nRules:\n- Use the field's "id" as the JSON key; if id is empty, use its "name".\n- For simple profile fields (name, email, etc.): return the matching profile key (e.g. "firstName", "email").\n- For open-ended questions (e.g. "What will you build?", "Why do you want to attend?", "Tell us about yourself"): write a compelling, specific, first-person answer (2-4 sentences) that fits the user profile. Return the answer text directly.\n- For "How did you hear about us?" style fields: return "Twitter / X", "LinkedIn", "A friend", or similar.\n- For select/dropdown fields (type="select"): pick one of the provided options. Never leave blank.\n- For checkbox fields (type="checkbox"): return "yes" to check it, or omit to leave unchecked.\n- For radio-group fields (type="radio-group"): return the EXACT option text or value.\n- For a "full name" field, use "fullName".\n- Always return a value for every field. Return ONLY valid JSON or a JSON code block, no prose.`,
+      text: `Autofill a web form. Return JSON mapping field id (or name) to value.\n\nUser profile:\n${profileDesc}\n${contextBlock}\nRules:\n- Key: field "id", fallback to "name"\n- Simple fields (name, email, phone): return profile key (e.g. "firstName", "email")\n- Open-ended questions: write compelling 2-3 sentence first-person answer matching profile\n- Select/dropdown: pick from provided options\n- Checkbox: "yes" to check, omit to leave unchecked\n- Radio-group: return exact option text/value\n- Full name: use "fullName"\n- Return ONLY valid JSON, no prose.`,
       cache_control: { type: 'ephemeral' }
     }
   ];
@@ -485,7 +485,7 @@ function buildCachedSystemBlock(profileDesc, contextBlock) {
 
 function buildSonnetPrompt(fields, profileDesc, availableKeys, contextBlock, pageCtxBlock) {
   const fieldDesc = buildFieldListCapped(fields);
-  return `${pageCtxBlock}Form fields (unmatched so far):\n${fieldDesc}\n\nProfile keys available: ${availableKeys}\n\nExample output:\n\`\`\`json\n{"applicant_first": "firstName", "contact_email": "email", "is_founder": "Yes", "build_description": "I'm building an AI-powered form autofill extension."}\n\`\`\``;
+  return `${pageCtxBlock}Fields:\n${fieldDesc}\nAvailable: ${availableKeys}\nOutput: {"field_id": "profile_key_or_answer"}`;
 }
 
 // ── Pass 3: Claude text fill ───────────────────────────────────────────────
