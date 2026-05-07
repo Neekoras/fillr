@@ -829,23 +829,12 @@ let undoStack = [];
 // ── Concurrent fill guard ─────────────────────────────────────────────────────
 let isFilling = false;
 
-// ── Main autofill function ────────────────────────────────────────────────────
-async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
-  if (isFilling) return { filled: 0 };
-  isFilling = true;
-  window.__fillrFillStart = Date.now();
-  const pageContext = getPageContext(); // Cache once for all passes
-  try {
+// ── Shared profile resolution (used by autofill and previewFill) ──────────
+async function resolveProfile(keys) {
   const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments', 'fieldOverrides'], resolve)
+    chrome.storage.local.get(keys, resolve)
   );
-
-  const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
   const hostname = location.hostname.toLowerCase();
-  if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) {
-    return { filled: 0, blocked: true };
-  }
-
   let profileData;
   const profiles = storageData.profiles;
   if (profiles && profiles.length > 0) {
@@ -858,8 +847,25 @@ async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
   } else {
     profileData = storageData;
   }
+  return { storageData, hostname, profile: getProfile(profileData || {}) };
+}
 
-  const profile = getProfile(profileData || {});
+// ── Main autofill function ────────────────────────────────────────────────────
+async function autofill({ skipFilled = false, passesStart = 1 } = {}) {
+  if (isFilling) return { filled: 0 };
+  isFilling = true;
+  window.__fillrFillStart = Date.now();
+  const pageContext = getPageContext(); // Cache once for all passes
+  try {
+  const { storageData, hostname, profile } = await resolveProfile(
+    ['profiles', 'activeProfile', 'apiKey', 'blockedSites', 'siteAssignments', 'fieldOverrides']
+  );
+
+  const blockedSites = (storageData.blockedSites || []).map(s => s.toLowerCase());
+  if (blockedSites.some(d => hostname === d || hostname.endsWith('.' + d))) {
+    return { filled: 0, blocked: true };
+  }
+
   const apiKey = storageData.apiKey || '';
   const fieldOverrides = storageData.fieldOverrides || {};
   let apiError = null;
@@ -1157,19 +1163,9 @@ async function resolveConfirmFields(filledEntries) {
 
 // ── Preview fill ───────────────────────────────────────────────────────────
 async function previewFill() {
-  const storageData = await new Promise(resolve =>
-    chrome.storage.local.get(['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'fieldOverrides'], resolve)
+  const { storageData, hostname, profile } = await resolveProfile(
+    ['profiles', 'activeProfile', 'blockedSites', 'siteAssignments', 'fieldOverrides']
   );
-  const hostname = location.hostname.toLowerCase();
-  let profileData;
-  const profiles = storageData.profiles;
-  if (profiles && profiles.length > 0) {
-    const siteAssignments = storageData.siteAssignments || {};
-    let activeIdx = Math.min(storageData.activeProfile || 0, profiles.length - 1);
-    if (siteAssignments[hostname] !== undefined) activeIdx = Math.min(siteAssignments[hostname], profiles.length - 1);
-    profileData = profiles[activeIdx];
-  } else { profileData = storageData; }
-  const profile = getProfile(profileData || {});
   const fieldOverrides = storageData.fieldOverrides || {};
 
   const fields = collectFields(false);
